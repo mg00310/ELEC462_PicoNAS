@@ -1,0 +1,334 @@
+#include "client.h"
+
+// --- TUI 그리기 ---
+void scroll_text(int y, int x, const char* text, int max_width) {
+    if (max_width <= 0) return;
+    size_t len = get_mb_len(text);
+    if (len <= max_width) {
+        mvprintw(y, x, "%.*s", max_width, text);
+        for(int i=len; i<max_width; i++) addch(' ');
+        return;
+    }
+    int scroll_len = len + 3;
+    int offset = g_scroll_tick % scroll_len;
+    char scroll_buf[MAX_FILENAME * 2 + 4];
+    snprintf(scroll_buf, sizeof(scroll_buf), "%s   %s", text, text);
+    if (offset + max_width <= strlen(scroll_buf)) {
+        mvprintw(y, x, "%.*s", max_width, scroll_buf + offset);
+    } else {
+        mvprintw(y, x, "%.*s", max_width, text);
+    }
+}
+
+/**
+ * @brief TUI 메인 화면을 그립니다.
+ */
+void draw_tui() {
+    erase();
+    int max_y, max_x;
+    getmaxyx(stdscr, max_y, max_x);
+
+    // --- 상단 바 (경로 또는 경로 탐색) ---
+    int bg_pair_top;
+    if (g_focus_zone == ZONE_PATH) {
+        bg_pair_top = 10;
+        attron(COLOR_PAIR(bg_pair_top));
+        mvprintw(0, 0, "%*s", max_x, " ");
+        mvprintw(0, 0, "경로 탐색: ");
+        int current_x = 10;
+
+        for (int i = 0; i < g_path_count; i++) {
+            size_t seg_len = get_mb_len(g_path_segs[i]); 
+            int display_len = seg_len + 4;
+            if (current_x + display_len >= max_x) break;
+
+            if (i == g_path_index) {
+                attron(COLOR_PAIR(2));
+                mvprintw(0, current_x, "[ %s ]", g_path_segs[i]);
+                attroff(COLOR_PAIR(2));
+            } else {
+                attron(COLOR_PAIR(bg_pair_top));
+                mvprintw(0, current_x, "  %s  ", g_path_segs[i]);
+                attroff(COLOR_PAIR(bg_pair_top));
+            }
+            current_x += (seg_len + 4);
+        }
+    } else {
+        bg_pair_top = 11; // 초록색 배경
+        attron(COLOR_PAIR(bg_pair_top));
+        mvprintw(0, 0, "%*s", max_x, " ");
+        mvprintw(0, 0, "경로: %s", g_current_path);
+    }
+    attroff(COLOR_PAIR(bg_pair_top));
+    
+
+    // --- 상단 바 (정렬 상태) ---
+    const char* base_modes[] = {"이름", "크기", "시간", "타입"};
+    const char* order_str = (g_sort_order == 1) ? " ▲" : " ▼";
+    
+    const int max_sort_width = 6; 
+    const int separator_width = 3; // " | "
+
+    int total_sort_width = 6 + (max_sort_width * 4) + (separator_width * 3) + 1;
+    
+    int sort_x = max_x - total_sort_width;
+    if (sort_x < 0) sort_x = 0;
+    
+    attron(COLOR_PAIR(bg_pair_top));
+    mvprintw(0, sort_x, "[정렬: ");
+    sort_x += 6;
+    
+    for (int i = 0; i < 4; i++) {
+        char display_str[20];
+        
+        if (i == g_sort_mode) {
+            snprintf(display_str, 20, "%s%s", base_modes[i], order_str);
+        } else {
+            strcpy(display_str, base_modes[i]);
+        }
+        
+        size_t display_len = get_mb_len(display_str);
+        
+        if (i == g_sort_mode) {
+            attron(COLOR_PAIR(2)); // 하이라이트
+        } else {
+            attron(COLOR_PAIR(bg_pair_top));
+        }
+
+        mvprintw(0, sort_x, "%s", display_str);
+        for (int k = display_len; k < max_sort_width; k++) {
+            addch(' ');
+        }
+        
+        if (i == g_sort_mode) attroff(COLOR_PAIR(2));
+        else attroff(COLOR_PAIR(bg_pair_top));
+
+        if (i < 3) {
+            attron(COLOR_PAIR(bg_pair_top));
+            mvprintw(0, sort_x + max_sort_width, " | ");
+            sort_x += (max_sort_width + separator_width);
+        }
+    }
+    
+    sort_x += max_sort_width;
+    attron(COLOR_PAIR(bg_pair_top));
+    mvprintw(0, sort_x, "]");
+    attroff(COLOR_PAIR(bg_pair_top));
+
+
+    // --- 헤더 ---
+    if (g_focus_zone == ZONE_HEADER) attron(COLOR_PAIR(7));
+    else attron(A_UNDERLINE | A_BOLD);
+    
+    int current_x = 0;
+    int select_col_width = get_mb_len("[선택]") + 1;
+    mvprintw(1, current_x, "[선택] "); current_x += select_col_width;
+    
+    int download_col_width = get_mb_len("[완료]") + 2;
+    int optional_cols_width = 0;
+    for (int i = 0; i < g_visible_cols; i++) {
+        optional_cols_width += G_COL_WIDTHS[i];
+    }
+    
+    int filename_width = max_x - select_col_width - optional_cols_width - download_col_width - 3;
+    if (filename_width < 10) filename_width = 10;
+    
+    mvprintw(1, current_x, "| 파일명");
+    for(int i=get_mb_len("파일명"); i < filename_width; i++) addch(' ');
+    current_x += (filename_width + 1);
+    
+    for (int i = 0; i < g_visible_cols; i++) {
+        mvprintw(1, current_x, "|%s", G_COL_NAMES_KR[i]);
+        current_x += G_COL_WIDTHS[i];
+    }
+    mvprintw(1, current_x, " | [완료] ");
+    
+    if (g_focus_zone == ZONE_HEADER) attroff(COLOR_PAIR(7));
+    else attroff(A_UNDERLINE | A_BOLD);
+
+    // --- 파일 목록 ---
+    int list_height = max_y - 3;
+    if (g_selected_item < g_scroll_offset) g_scroll_offset = g_selected_item;
+    if (g_selected_item >= g_scroll_offset + list_height)
+        g_scroll_offset = g_selected_item - list_height + 1;
+
+    for (int i = g_scroll_offset; i < g_file_count && i < (g_scroll_offset + list_height) ; i++) {
+        int screen_y = i - g_scroll_offset + 2;
+        struct FileInfo *item = &g_file_list[i];
+        
+        int color_pair;
+        if (g_focus_zone == ZONE_LIST && i == g_selected_item) color_pair = 2;
+        else if (item->is_selected) color_pair = 5;
+        else if (item->is_downloaded) color_pair = 4;
+        else if (item->type == 'd' && strcmp(item->filename, "..") == 0) color_pair = 8;
+        else if (item->type == 'd') color_pair = 3;
+        else if (item->type == 'l') color_pair = 6;
+        else color_pair = 1;
+        
+        attron(COLOR_PAIR(color_pair));
+        if (color_pair == 8) attron(A_DIM);
+
+        current_x = 0;
+        if (strcmp(item->filename, "..") == 0) {
+             mvprintw(screen_y, current_x, "[ ]   ");
+        } else {
+             mvprintw(screen_y, current_x, "[%c]   ", item->is_selected ? 'S' : ' ');
+        }
+        current_x += select_col_width;
+        
+        mvprintw(screen_y, current_x, "| ");
+        scroll_text(screen_y, current_x + 2, item->filename, filename_width);
+        current_x += (filename_width + 1);
+
+        for (int j = 0; j < g_visible_cols; j++) {
+            switch(j) {
+                case COL_TIME:
+                    mvprintw(screen_y, current_x, "| %-16.16s", item->mod_time_str); break;
+                case COL_SIZE:
+                    if (item->type == 'd' || item->type == 'l' || item->size < 0) {
+                        mvprintw(screen_y, current_x, "| %-8.8s", "");
+                    } else {
+                        char size_buf[10];
+                        format_size(size_buf, 10, item->size);
+                        mvprintw(screen_y, current_x, "| %8.8s ", size_buf);
+                    }
+                    break;
+                case COL_OWNER:
+                    mvprintw(screen_y, current_x, "| %-8.8s", item->owner); break;
+                case COL_GROUP:
+                    mvprintw(screen_y, current_x, "| %-8.8s", item->group); break;
+                case COL_PERM:
+                    mvprintw(screen_y, current_x, "| %s", item->permissions); break;
+            }
+            current_x += G_COL_WIDTHS[j];
+        }
+        mvprintw(screen_y, current_x, " | [ %c ] ", item->is_downloaded ? 'Y' : ' ');
+        
+        if (color_pair == 8) attroff(A_DIM);
+        attroff(COLOR_PAIR(color_pair));
+    }
+
+    // --- 하단 상태 표시줄 ---
+    attron(COLOR_PAIR(11));
+    mvprintw(max_y - 1, 0, "%*s", max_x, " ");
+
+    char help_str[256];
+    switch(g_focus_zone) {
+        case ZONE_PATH:
+            snprintf(help_str, 256, "[↔]이동 [Enter]선택 [↓]헤더 [Q]종료");
+            break;
+        case ZONE_HEADER:
+            snprintf(help_str, 256, "[↔]컬럼 [C]정렬기준 [D]정렬순서 [↑]경로 [↓]목록 [Q]종료");
+            break;
+        case ZONE_LIST:
+        default:
+            snprintf(help_str, 256, "[↑]헤더 [Space]선택 [Enter]이동 [D]다운 [Q]종료");
+            break;
+    }
+    
+    char status_bar_text[max_x + 1];
+    snprintf(status_bar_text, sizeof(status_bar_text), " %s | %s", help_str, g_status_msg);
+    
+    mvprintw(max_y - 1, 0, "%.*s", max_x, status_bar_text);
+    attroff(COLOR_PAIR(11));
+
+    refresh();
+}
+
+/**
+ * @brief 키 입력을 처리합니다.
+ */
+void handle_keys(int ch) {
+    g_status_msg[0] = '\0';
+    switch (g_focus_zone) {
+        case ZONE_PATH:
+            switch (ch) {
+                case 'q': case 'Q': close_tui(); exit(0); break;
+                case KEY_DOWN: g_focus_zone = ZONE_HEADER; break;
+                
+                case KEY_LEFT:
+                    if (g_path_index > 0) g_path_index--;
+                    break;
+                case KEY_RIGHT:
+                    if (g_path_index < g_path_count - 1) g_path_index++;
+                    break;
+                
+                case KEY_ENTER: case 10:
+                    if (g_path_index >= 0 && g_path_index < g_path_count) {
+                        
+                        char* target_path = g_path_routes[g_path_index];
+
+                        if (target_path) {
+                            if (strcmp(target_path, g_current_path) == 0) {
+                                snprintf(g_status_msg, 100, "이미 현재 경로입니다.");
+                            } else {
+                                cd_client(g_sock_main, target_path);
+                            }
+                        } else {
+                            snprintf(g_status_msg, 100, "경로 인덱스 오류");
+                        }
+                        
+                        g_focus_zone = ZONE_LIST;
+
+                    } else {
+                         snprintf(g_status_msg, 100, "세그먼트 인덱스 오류");
+                    }
+                    break;
+            }
+            break;
+        
+        case ZONE_HEADER:
+            switch (ch) {
+                case 'q': case 'Q': close_tui(); exit(0); break;
+                case KEY_UP:
+                    parse_path();
+                    g_focus_zone = ZONE_PATH;
+                    break;
+                case KEY_DOWN: g_focus_zone = ZONE_LIST; break;
+                case KEY_RIGHT:
+                    if (g_visible_cols < NUM_OPT_COLS) g_visible_cols++;
+                    break;
+                case KEY_LEFT:
+                    if (g_visible_cols > 0) g_visible_cols--;
+                    break;
+                case 'c': case 'C':
+                    g_sort_mode = (g_sort_mode + 1) % 4;
+                    sort_list();
+                    break;
+                case 'd': case 'D':
+                    g_sort_order *= -1;
+                    sort_list();
+                    break;
+            }
+            break;
+        case ZONE_LIST:
+            switch (ch) {
+                case 'q': case 'Q': close_tui(); exit(0); break;
+                case KEY_UP:
+                    if (g_selected_item > 0) g_selected_item--;
+                    else g_focus_zone = ZONE_HEADER;
+                    break;
+                case KEY_DOWN:
+                    if (g_selected_item < g_file_count - 1) g_selected_item++;
+                    break;
+                case KEY_PPAGE: g_selected_item -= 10; if (g_selected_item < 0) g_selected_item = 0; break;
+                case KEY_NPAGE: g_selected_item += 10; if (g_selected_item >= g_file_count) g_selected_item = g_file_count - 1; break;
+                case KEY_ENTER: case 10:
+                    if (g_file_list[g_selected_item].type == 'd') {
+                        cd_client(g_sock_main, g_file_list[g_selected_item].filename);
+                    } else {
+                        snprintf(g_status_msg, 100, "디렉터리가 아닙니다.");
+                    }
+                    break;
+                case ' ':
+                    if (strcmp(g_file_list[g_selected_item].filename, "..") != 0) {
+                        g_file_list[g_selected_item].is_selected = !g_file_list[g_selected_item].is_selected;
+                    }
+                    break;
+                case 'D': case 'd':
+                    start_downloads();
+                    break;
+            }
+            break;
+    }
+}
