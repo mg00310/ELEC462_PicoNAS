@@ -76,28 +76,50 @@ void cd_client(int sock, const char* dirname) {
 // --- 다운로드 로직 ---
 void* download_thread(void* arg) {
     struct DownloadArgs* args = (struct DownloadArgs*)arg;
-    struct FileInfo item = args->file_info; // Use the copied FileInfo
+    struct FileInfo item = args->file_info;
     char current_path[MAX_PATH];
     strcpy(current_path, args->curr_path);
-    free(args); // Free the args struct immediately after copying data
+    free(args);
+
+    // 1. 다운로드 진행률을 추적할 빈 슬롯을 찾아서 할당
+    int slot_index = -1;
+    pthread_mutex_lock(&g_prog_mutex);
+    for (int i = 0; i < MAX_ACTIVE_DOWNLOADS; i++) {
+        if (!g_down_prog[i].active) {
+            g_down_prog[i].active = 1;
+            strncpy(g_down_prog[i].filename, item.filename, MAX_FILENAME - 1);
+            g_down_prog[i].filename[MAX_FILENAME - 1] = '\0';
+            g_down_prog[i].progress = 0.0;
+            slot_index = i;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_prog_mutex);
+
+    if (slot_index == -1) {
+        snprintf(g_status_msg, 100, "최대 동시 다운로드 수 초과");
+        return NULL;
+    }
 
     char buffer[4096]; char resp[5] = {0};
-    int64_t file_size_net, file_size;
+    int64_t file_size;
     int sock = socket(PF_INET, SOCK_STREAM, 0);
     struct sockaddr_in serv_addr;
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = inet_addr(g_server_ip);
     serv_addr.sin_port = htons(PORT);
+
     if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
-        snprintf(g_status_msg, 100, "다운실패(%.30s...): 연결", item.filename); return NULL;
+        snprintf(g_status_msg, 100, "다운실패(%.30s...): 연결", item.filename);
+        goto cleanup;
     }
+
     snprintf(buffer, sizeof(buffer), "%s %s %s", CMD_AUTH, g_user, g_pass);
-    if (write(sock, buffer, strlen(buffer)) <= 0) { close(sock); return NULL; }
-    if (read_full(sock, resp, 4) != 0) { close(sock); return NULL; }
-    if (strncmp(resp, RESP_OK, 4) != 0) {
+    if (write(sock, buffer, strlen(buffer)) <= 0) { close(sock); goto cleanup; }
+    if (read_full(sock, resp, 4) != 0 || strncmp(resp, RESP_OK, 4) != 0) {
         snprintf(g_status_msg, 100, "다운실패(%.30s...): 인증", item.filename);
-        close(sock); return NULL;
+        close(sock); goto cleanup;
     }
     uint32_t net_len, len;
     read_full(sock, &net_len, sizeof(uint32_t)); len = ntohl(net_len); read_full(sock, buffer, len);
@@ -107,49 +129,69 @@ void* download_thread(void* arg) {
     snprintf(full_path, sizeof(full_path), "%s/%s", current_path, item.filename);
     snprintf(buffer, sizeof(buffer), "%s %s", CMD_GET, full_path);
 
-    if (write(sock, buffer, strlen(buffer)) <= 0) { close(sock); return NULL; }
+    if (write(sock, buffer, strlen(buffer)) <= 0) { close(sock); goto cleanup; }
     if (read_full(sock, resp, 4) != 0 || strncmp(resp, RESP_GET_S, 4) != 0) {
         snprintf(g_status_msg, 100, "다운실패(%.30s...): 파일없음", item.filename);
-        close(sock); return NULL;
+        close(sock); goto cleanup;
     }
-    if (read_full(sock, &file_size_net, sizeof(int64_t)) != 0) { close(sock); return NULL; }
+
+    uint64_t file_size_net;
+    if (read_full(sock, &file_size_net, sizeof(uint64_t)) != 0) { close(sock); goto cleanup; }
     file_size = be64toh(file_size_net);
+
     int fd = open(item.filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd == -1) {
         snprintf(g_status_msg, 100, "다운실패(%.30s...): 파일생성", item.filename);
-        close(sock); return NULL;
+        close(sock); goto cleanup;
     }
+
     ssize_t bytes_read;
     int64_t total_received = 0;
-    while (total_received < file_size)
-    {
+    double last_prog = 0.0;
+
+    while (total_received < file_size) {
         int64_t remaining = file_size - total_received;
         size_t to_read = sizeof(buffer);
-        if (remaining < to_read) {
-            to_read = (size_t)remaining;
-        }
+        if (remaining < to_read) to_read = (size_t)remaining;
 
         bytes_read = read(sock, buffer, to_read);
-        if (bytes_read <= 0) { // 연결 끊김 또는 오류
-            break;
-        }
+        if (bytes_read <= 0) break;
 
         ssize_t written_bytes = write(fd, buffer, bytes_read);
-        if (written_bytes != bytes_read) { // 쓰기 오류
-            break;
-        }
+        if (written_bytes != bytes_read) break;
 
         total_received += bytes_read;
-        snprintf(g_status_msg, 100, "다운중(%.20s...): %" PRId64 "/%" PRId64 " KB", 
-                 item.filename, total_received / 1024, file_size / 1024);
+        
+        // 2. 다운로드 진행률을 계산하고 UI 스레드와 공유
+        if (file_size > 0) {
+            double down_prog = (double)total_received / file_size;
+            // 약 1% 이상 변경될 때마다 UI 갱신을 위해 값 업데이트
+            if (down_prog - last_prog >= 0.01 || total_received == file_size) {
+                pthread_mutex_lock(&g_prog_mutex);
+                g_down_prog[slot_index].progress = down_prog;
+                pthread_mutex_unlock(&g_prog_mutex);
+                last_prog = down_prog;
+                snprintf(g_status_msg, 100, "다운중(%.20s...): %.0f%%", item.filename, down_prog * 100);
+            }
+        }
     }
+    
     close(fd); close(sock);
+
     if (total_received == file_size) {
         snprintf(g_status_msg, 100, "다운완료: %.30s...", item.filename);
         add_queue(item.filename);
     } else {
         snprintf(g_status_msg, 100, "다운실패(%.30s...): 불완전", item.filename);
         remove(item.filename);
+    }
+
+cleanup:
+    // 3. 다운로드 완료/실패 시, 사용했던 진행률 추적 슬롯을 반납
+    if (slot_index != -1) {
+        pthread_mutex_lock(&g_prog_mutex);
+        g_down_prog[slot_index].active = 0;
+        pthread_mutex_unlock(&g_prog_mutex);
     }
     return NULL;
 }
