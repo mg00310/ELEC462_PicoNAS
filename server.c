@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <ctype.h>
 #include "common.h"
 
 // 로그용 뮤텍스
@@ -217,10 +218,17 @@ void do_auth(ClientState* state, char* buffer) {
  * @brief 'CD' 명령어를 처리하여 현재 작업 디렉터리를 변경합니다.
  */
 void do_cd(ClientState* state, char* buffer) {
-    char cmd[10], dirname[MAX_PATH];
-    if (sscanf(buffer, "%s %s", cmd, dirname) != 2) {
+    char dirname[MAX_PATH];
+    if (strlen(buffer) < 5) {
         write(state->sock, RESP_ERR, 4); return;
     }
+    
+    char* path_ptr = buffer + 4;
+    while (*path_ptr && isspace((unsigned char)*path_ptr)) {
+        path_ptr++;
+    }
+    strncpy(dirname, path_ptr, sizeof(dirname) - 1);
+    dirname[sizeof(dirname) - 1] = '\0';
 
     char target_path[MAX_PATH * 2], resolved_path[MAX_PATH];
 
@@ -341,10 +349,17 @@ void do_ls(ClientState* state) {
  * @brief 'GET' 명령어를 처리하여 파일을 클라이언트에 전송합니다.
  */
 void do_get(ClientState* state, char* buffer) {
-    char cmd[10], full_path[MAX_PATH];
-    if (sscanf(buffer, "%s %s", cmd, full_path) != 2) {
+    char full_path[MAX_PATH];
+    if (strlen(buffer) < 5) {
         write(state->sock, RESP_ERR, 4); return;
     }
+
+    char* path_ptr = buffer + 4;
+    while (*path_ptr && isspace((unsigned char)*path_ptr)) {
+        path_ptr++;
+    }
+    strncpy(full_path, path_ptr, sizeof(full_path) - 1);
+    full_path[sizeof(full_path) - 1] = '\0';
     
     char resolved_path[MAX_PATH];
     server_log("Socket %d GET 요청: %s\n", state->sock, full_path);
