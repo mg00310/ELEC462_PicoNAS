@@ -296,6 +296,8 @@ void do_ls(ClientState* state) {
     // '.' 현재 디렉터리는 목록에서 제외
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0) continue;
+        // [Fix] WSL/Windows 호환성: 불필요한 'identifier' 파일 목록에서 제외
+        if (strcmp(entry->d_name, "identifier") == 0) continue;
         file_count++;
     }
     closedir(dir);
@@ -314,6 +316,8 @@ void do_ls(ClientState* state) {
     int i = 0;
     while ((entry = readdir(dir)) != NULL && i < file_count) {
         if (strcmp(entry->d_name, ".") == 0) continue;
+        // [Fix] WSL/Windows 호환성: 불필요한 'identifier' 파일 목록에서 제외
+        if (strcmp(entry->d_name, "identifier") == 0) continue;
         struct FileInfo *item = &file_list[i];
         memset(item, 0, sizeof(struct FileInfo));
         snprintf(full_path, sizeof(full_path), "%s/%s", state->curr_path, entry->d_name);

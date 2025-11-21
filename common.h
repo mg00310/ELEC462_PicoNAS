@@ -32,10 +32,9 @@ struct FileInfo {
     char filename[MAX_FILENAME];
     int64_t size;
     char type;
-
-    // [수정] 클라이언트 상태 플래그
+    
     int is_selected;
-    int is_downloaded; // (요청 1) 다운로드 상태
+    int is_downloaded;
 
     char permissions[11];
     char owner[MAX_NAME];

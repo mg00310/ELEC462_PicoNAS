@@ -36,6 +36,19 @@ struct DownloadArgs {
     char curr_path[MAX_PATH];
 };
 
+// --- 다운로드 진행 상태 추적 ---
+#define MAX_ACTIVE_DOWNLOADS 10
+// 다운로드 진행률 표시를 위한 구조체
+struct DownStatus {
+    char filename[MAX_FILENAME];
+    double progress; // 0.0 ~ 1.0
+    int active;      // 활성화 여부 
+};
+
+extern struct DownStatus g_down_prog[MAX_ACTIVE_DOWNLOADS];
+extern pthread_mutex_t g_prog_mutex;
+
+
 
 // --- 전역 변수 선언 ---
 extern struct FileInfo *g_file_list;

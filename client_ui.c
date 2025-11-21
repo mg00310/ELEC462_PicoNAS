@@ -124,7 +124,7 @@ void draw_tui() {
     int select_col_width = get_mb_len("[선택]") + 1;
     mvprintw(1, current_x, "[선택] "); current_x += select_col_width;
     
-    int download_col_width = get_mb_len("[완료]") + 2;
+    int download_col_width = 10; // UI 수정 '완료' 컬럼 너비를 고정값으로 수정
     int optional_cols_width = 0;
     for (int i = 0; i < g_visible_cols; i++) {
         optional_cols_width += G_COL_WIDTHS[i];
@@ -156,10 +156,19 @@ void draw_tui() {
         int screen_y = i - g_scroll_offset + 2;
         struct FileInfo *item = &g_file_list[i];
         
+        /* --- 색상 표시 우선순위 ---
+         * 1. 현재 커서 위치 (청록색 배경)
+         * 2. 다운로드 선택 (빨간색 배경)
+         * 3. 다운로드 완료 (파란 글씨/노란 배경)
+         * 4. 상위 디렉터리 '..' (흐린 글씨)
+         * 5. 디렉터리 (청록색 글씨)
+         * 6. 심볼릭 링크 (자주색 글씨)
+         * 7. 일반 파일 (흰색 글씨)
+         */
         int color_pair;
-        if (g_focus_zone == ZONE_LIST && i == g_selected_item) color_pair = 2;
+        if (g_focus_zone == ZONE_LIST && i == g_selected_item) color_pair = 7; 
         else if (item->is_selected) color_pair = 5;
-        else if (item->is_downloaded) color_pair = 4;
+        else if (item->is_downloaded) color_pair = 12;
         else if (item->type == 'd' && strcmp(item->filename, "..") == 0) color_pair = 8;
         else if (item->type == 'd') color_pair = 3;
         else if (item->type == 'l') color_pair = 6;
@@ -168,44 +177,78 @@ void draw_tui() {
         attron(COLOR_PAIR(color_pair));
         if (color_pair == 8) attron(A_DIM);
 
+        // 선택된 행 배경색 적용
+        if (color_pair == 2) {
+            mvprintw(screen_y, 0, "%*s", max_x - 1, " ");
+            
+        }
+
         current_x = 0;
         if (strcmp(item->filename, "..") == 0) {
              mvprintw(screen_y, current_x, "[ ]   ");
+
         } else {
-             mvprintw(screen_y, current_x, "[%c]   ", item->is_selected ? 'S' : ' ');
+             mvprintw(screen_y, current_x, "[%s]   ", item->is_selected ? "○" : " ");
+
         }
+
         current_x += select_col_width;
         
         mvprintw(screen_y, current_x, "| ");
         scroll_text(screen_y, current_x + 2, item->filename, filename_width);
         current_x += (filename_width + 1);
 
+        // [UI Fix] 컬럼 너비에 맞게 출력 포맷을 조정하여 정렬 문제 해결
         for (int j = 0; j < g_visible_cols; j++) {
             switch(j) {
                 case COL_TIME:
-                    mvprintw(screen_y, current_x, "| %-16.16s", item->mod_time_str); break;
+                    mvprintw(screen_y, current_x, "| %-16s", item->mod_time_str); break;
                 case COL_SIZE:
                     if (item->type == 'd' || item->type == 'l' || item->size < 0) {
-                        mvprintw(screen_y, current_x, "| %-8.8s", "");
+                        mvprintw(screen_y, current_x, "| %8s ", "");
                     } else {
                         char size_buf[10];
                         format_size(size_buf, 10, item->size);
-                        mvprintw(screen_y, current_x, "| %8.8s ", size_buf);
+                        mvprintw(screen_y, current_x, "| %8s", size_buf);
                     }
                     break;
                 case COL_OWNER:
-                    mvprintw(screen_y, current_x, "| %-8.8s", item->owner); break;
+                    mvprintw(screen_y, current_x, "| %-8s", item->owner); break;
                 case COL_GROUP:
-                    mvprintw(screen_y, current_x, "| %-8.8s", item->group); break;
+                    mvprintw(screen_y, current_x, "| %-8s", item->group); break;
                 case COL_PERM:
-                    mvprintw(screen_y, current_x, "| %s", item->permissions); break;
+                    mvprintw(screen_y, current_x, "| %-11s", item->permissions); break;
             }
-            current_x += G_COL_WIDTHS[j];
-        }
-        mvprintw(screen_y, current_x, " | [ %c ] ", item->is_downloaded ? 'Y' : ' ');
-        
-        if (color_pair == 8) attroff(A_DIM);
-        attroff(COLOR_PAIR(color_pair));
+                    current_x += G_COL_WIDTHS[j];
+                    }
+                    mvprintw(screen_y, current_x, " | [ %s ]  ", item->is_downloaded ? "●" : " "); // UI 수정: 헤더와 너비를 맞추기 위해 공백 추가
+                    
+                            if (color_pair == 8) attroff(A_DIM);
+                            attroff(COLOR_PAIR(color_pair));
+                    
+                            // 다운로드 진행률 막대를 화면에 덧그림
+                            if (color_pair != 2) {
+                                pthread_mutex_lock(&g_prog_mutex);
+                                for (int j = 0; j < MAX_ACTIVE_DOWNLOADS; j++) {
+                                    if (g_down_prog[j].active && strcmp(g_down_prog[j].filename, item->filename) == 0) {
+                                        if (g_down_prog[j].progress > 0) {
+                                            int bar_start_x = 0; // 줄의 시작부터
+                                            int bar_width = (int)(g_down_prog[j].progress * (double)(max_x - 1)); // 전체 너비에 비례
+
+                                            if (bar_width > max_x - 1) bar_width = max_x - 1;
+
+                                            if (bar_width > 0) {
+                                                mvwchgat(stdscr, screen_y, bar_start_x, bar_width, 0, 2, NULL);
+                                            }
+                    
+                                        }
+                    
+                                        break;
+                                    }
+                    
+                                }
+                                pthread_mutex_unlock(&g_prog_mutex);
+                            }
     }
 
     // --- 하단 상태 표시줄 ---
@@ -218,11 +261,11 @@ void draw_tui() {
             snprintf(help_str, 256, "[↔]이동 [Enter]선택 [↓]헤더 [Q]종료");
             break;
         case ZONE_HEADER:
-            snprintf(help_str, 256, "[↔]컬럼 [C]정렬기준 [D]정렬순서 [↑]경로 [↓]목록 [Q]종료");
+            snprintf(help_str, 256, "[↔]컬럼 [C]정렬기준 [D]정렬순서 [⤉]경로 [↓]목록 [Q]종료");
             break;
         case ZONE_LIST:
         default:
-            snprintf(help_str, 256, "[↑]헤더 [Space]선택 [Enter]이동 [D]다운 [Q]종료");
+            snprintf(help_str, 256, "[↑↓]이동(↑:헤더) [Space]선택 [Enter]이동 [D]다운 [Q]종료");
             break;
     }
     
