@@ -120,3 +120,7 @@
     -   `sys/stat.h`: `stat()`으로 파일 크기 획득.
     -   `ftw.h`: `nftw()`로 디렉터리 트리 재귀 탐색.
     -   `stdlib.h`: `qsort()`로 클라이언트에서 목록 정렬.
+
+## 개발 참고 자료
+
+- **아이콘 및 특수문자**: [https://symbl.cc/](https://symbl.cc/)
