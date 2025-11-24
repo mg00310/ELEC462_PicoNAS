@@ -1,0 +1,9 @@
+# Compiled executables
+server
+client
+
+
+
+# Log files
+*.log
+logs/
