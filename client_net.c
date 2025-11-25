@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "client.h"
 
 // --- 프로토콜 (서버 통신) ---
@@ -153,40 +154,13 @@ char* cat_client_fetch(int sock, const char* filename, size_t* content_size) {
             return NULL;
         }
 
-        // Check for end marker within the received chunk
-        char* end_marker_pos = memmem(data_chunk, bytes_read, RESP_CAT_E, 4);
-
-        if (end_marker_pos != NULL) {
-            size_t data_len_before_marker = end_marker_pos - data_chunk;
-            // Ensure enough space for the data before the marker + null terminator
-            if (current_length + data_len_before_marker + 1 > current_capacity) {
-                current_capacity = current_length + data_len_before_marker + 1;
-                char* temp_buffer = (char*)realloc(content_buffer, current_capacity);
-                if (!temp_buffer) {
-                    client_log(LOG_FATAL, "realloc for CAT buffer failed");
-                    free(content_buffer);
-                    if (content_size) *content_size = 0;
-                    return NULL;
-                }
-                content_buffer = temp_buffer;
-            }
-            memcpy(content_buffer + current_length, data_chunk, data_len_before_marker);
-            current_length += data_len_before_marker;
-            content_buffer[current_length] = '\0'; // Null-terminate
-            if (content_size) *content_size = current_length;
-            client_log(LOG_DEBUG, "CAT for '%s' finished successfully. Total size: %zu bytes.", filename, current_length);
-            add_debug_log("<- RECV: [file content, %zu bytes]", current_length);
-            return content_buffer;
-        }
-
-        // No end marker, append full chunk
+        // Append new data first
         if (current_length + bytes_read + 1 > current_capacity) {
-            current_capacity *= 2; // Double the capacity
-            // If doubling isn't enough for the current chunk
-            if (current_length + bytes_read + 1 > current_capacity) {
-                current_capacity = current_length + bytes_read + 1;
+            size_t new_capacity = current_capacity * 2;
+            if (new_capacity < current_length + bytes_read + 1) {
+                new_capacity = current_length + bytes_read + 1;
             }
-            char* temp_buffer = (char*)realloc(content_buffer, current_capacity);
+            char* temp_buffer = (char*)realloc(content_buffer, new_capacity);
             if (!temp_buffer) {
                 client_log(LOG_FATAL, "realloc for CAT buffer failed on chunk append");
                 free(content_buffer);
@@ -194,9 +168,37 @@ char* cat_client_fetch(int sock, const char* filename, size_t* content_size) {
                 return NULL;
             }
             content_buffer = temp_buffer;
+            current_capacity = new_capacity;
         }
         memcpy(content_buffer + current_length, data_chunk, bytes_read);
         current_length += bytes_read;
+
+        // Now, search for the end marker in the combined buffer
+        // To optimize, we only need to search in the area where the marker could possibly be (near the end of the previous data and the new chunk)
+        char* search_start = content_buffer;
+        if (current_length > sizeof(data_chunk) + 4) {
+             search_start = content_buffer + current_length - sizeof(data_chunk) - 4;
+        }
+       
+        char* end_marker_pos = memmem(search_start, content_buffer + current_length - search_start, RESP_CAT_E, 4);
+
+        if (end_marker_pos != NULL) {
+            size_t final_len = end_marker_pos - content_buffer;
+            
+            char* final_buffer = (char*)realloc(content_buffer, final_len + 1);
+            if (!final_buffer) {
+                 client_log(LOG_FATAL, "final realloc for CAT buffer failed");
+                 free(content_buffer);
+                 if (content_size) *content_size = 0;
+                 return NULL;
+            }
+            final_buffer[final_len] = '\0';
+            
+            if (content_size) *content_size = final_len;
+            client_log(LOG_DEBUG, "CAT for '%s' finished successfully. Total size: %zu bytes.", filename, final_len);
+            add_debug_log("<- RECV: [file content, %zu bytes]", final_len);
+            return final_buffer;
+        }
     }
 }
 
