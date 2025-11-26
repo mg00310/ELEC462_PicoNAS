@@ -14,6 +14,8 @@
 #define CMD_LS   "LS  " // (현재 디렉터리 요청)
 #define CMD_CD   "CD  " // + [dirname]
 #define CMD_GET  "GET " // + [filename] (Phase 4에서 사용)
+#define CMD_GETDIR "GDIR"
+#define RESP_GETDIR_S "GDIR"
 
 // --- 3. 프로토콜 응답 (Server -> Client) ---
 #define RESP_OK   "OK  "

@@ -63,6 +63,7 @@ void do_auth(ClientState* state, char* buffer);
 void do_ls(ClientState* state);
 void do_cd(ClientState* state, char* buffer);
 void do_get(ClientState* state, char* buffer);
+void do_getdir(ClientState* state, char* buffer);
 void get_perm_str(mode_t mode, char *str);
 int write_full(int sock, const void* buf, size_t len);
 
@@ -158,6 +159,10 @@ void* handle_client(void* arg) {
         else if (strncmp(buffer, CMD_GET, 4) == 0) { 
              if (!state->is_authed) write(sock, RESP_ERR, 4);
             else do_get(state, buffer);
+        }
+        else if (strncmp(buffer, CMD_GETDIR, 4) == 0) {
+            if (!state->is_authed) write(state->sock, RESP_ERR, 4);
+            else do_getdir(state, buffer);
         }
         else {
             write(sock, RESP_ERR, 4);
@@ -283,6 +288,25 @@ void do_cd(ClientState* state, char* buffer) {
     write_full(state->sock, state->curr_path, strlen(state->curr_path));
 }
 
+#include <ftw.h>
+
+static uint64_t dir_size_accum;
+
+int nftw_cb(const char* fpath, const struct stat* sb,
+            int typeflag, struct FTW* ftwbuf)
+{
+    if (typeflag == FTW_F)
+        dir_size_accum += sb->st_size;
+    return 0;
+}
+
+uint64_t calc_dir_size(const char* path) {
+    dir_size_accum = 0;
+    nftw(path, nftw_cb, 20, FTW_PHYS);
+    return dir_size_accum;
+}
+
+
 /**
  * @brief 'LS' 명령어를 처리하여 현재 디렉터리의 파일 목록을 전송합니다.
  */
@@ -327,7 +351,11 @@ void do_ls(ClientState* state) {
             i++; continue;
         }
         strncpy(item->filename, entry->d_name, MAX_FILENAME);
-        item->size = st.st_size;
+        if (S_ISDIR(st.st_mode)) {
+            item->size = calc_dir_size(full_path);
+        } else {
+            item->size = st.st_size;
+        }
         get_perm_str(st.st_mode, item->permissions);
         if (S_ISDIR(st.st_mode)) item->type = 'd';
         else if (S_ISLNK(st.st_mode)) item->type = 'l';
@@ -411,6 +439,71 @@ void do_get(ClientState* state, char* buffer) {
     
     server_log("Socket %d 파일 전송 완료: %s\n", state->sock, full_path);
 }
+
+void do_getdir(ClientState* state, char* buffer) {
+    // 1. GETDIR 파라미터 파싱
+    char full_path[MAX_PATH];
+    char* p = buffer + 4;
+    while (*p == ' ') p++;
+    strncpy(full_path, p, sizeof(full_path) - 1);
+    full_path[sizeof(full_path)-1] = '\0';
+
+    char resolved[MAX_PATH];
+    if (realpath(full_path, resolved) == NULL) {
+        write(state->sock, RESP_ERR, 4);
+        return;
+    }
+
+    // 2. Jail 체크
+    if (strncmp(resolved, state->root_path, strlen(state->root_path)) != 0) {
+        write(state->sock, RESP_ERR, 4);
+        return;
+    }
+
+    // 3. 디렉터리인지 확인
+    struct stat st;
+    if (stat(resolved, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        write(state->sock, RESP_ERR, 4);
+        return;
+    }
+
+    // 4. tar 파일 생성
+    char tmp_tar[256];
+    snprintf(tmp_tar, sizeof(tmp_tar), "/tmp/piconas_%d.tar", getpid());
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("tar", "tar", "-cf", tmp_tar, "-C",
+               dirname(resolved), basename(resolved), NULL);
+        exit(1);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+
+    // 5. tar 크기 전송
+    struct stat ts;
+    stat(tmp_tar, &ts);
+    uint64_t size = ts.st_size;
+    uint64_t size_net = htobe64(size);
+
+    write_full(state->sock, RESP_GETDIR_S, 4);
+    write_full(state->sock, &size_net, sizeof(size_net));
+
+    // 6. tar 파일 내용 전송
+    int fd = open(tmp_tar, O_RDONLY);
+    char buf[4096];
+    ssize_t r;
+    while ((r = read(fd, buf, sizeof(buf))) > 0) {
+        write_full(state->sock, buf, r);
+    }
+    close(fd);
+
+    // 7. 임시 tar 삭제
+    unlink(tmp_tar);
+
+    server_log("폴더 전송 완료: %s\n", resolved);
+}
+
 
 /**
  * @brief 파일 권한(mode_t)을 "rwxr-xr--" 형태의 문자열로 변환합니다.
