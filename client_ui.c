@@ -1,4 +1,8 @@
 #include "client.h"
+#include <wctype.h> // For iswspace, etc.
+#include <locale.h> // For setlocale
+
+void show_remote_file(const char* filename);
 
 // --- TUI 그리기 ---
 void scroll_text(int y, int x, const char* text, int max_width) {
@@ -147,7 +151,10 @@ void draw_tui() {
     else attroff(A_UNDERLINE | A_BOLD);
 
     // --- 파일 목록 ---
-    int list_height = max_y - 3;
+    int debug_panel_height = g_show_debug ? (DEBUG_MSG_COUNT + 2) : 0;
+    int list_height = max_y - 3 - debug_panel_height;
+    if (list_height < 1) list_height = 1;
+
     if (g_selected_item < g_scroll_offset) g_scroll_offset = g_selected_item;
     if (g_selected_item >= g_scroll_offset + list_height)
         g_scroll_offset = g_selected_item - list_height + 1;
@@ -251,9 +258,11 @@ void draw_tui() {
                             }
     }
 
+    int status_bar_y = max_y - 1 - debug_panel_height;
+
     // --- 하단 상태 표시줄 ---
     attron(COLOR_PAIR(11));
-    mvprintw(max_y - 1, 0, "%*s", max_x, " ");
+    mvprintw(status_bar_y, 0, "%*s", max_x, " ");
 
     char help_str[256];
     switch(g_focus_zone) {
@@ -265,15 +274,33 @@ void draw_tui() {
             break;
         case ZONE_LIST:
         default:
-            snprintf(help_str, 256, "[↑↓]이동(↑:헤더) [Space]선택 [Enter]이동 [D]다운 [Q]종료");
+             if (g_file_count > 0) {
+                char enter_action[20];
+                if (g_file_list[g_selected_item].type == 'd') {
+                    snprintf(enter_action, sizeof(enter_action), "이동");
+                } else if (g_file_list[g_selected_item].type == 'f') {
+                    if (is_binary(g_file_list[g_selected_item].filename)) {
+                        snprintf(enter_action, sizeof(enter_action), "미리보기 불가");
+                    } else {
+                        snprintf(enter_action, sizeof(enter_action), "보기");
+                    }
+                } else {
+                    snprintf(enter_action, sizeof(enter_action), "동작불가");
+                }
+                snprintf(help_str, 256, "[↑↓]이동 [Space]선택 [Enter]%s [D]다운 [Q]종료", enter_action);
+            } else {
+                snprintf(help_str, 256, "[↑↓]이동 [Space]선택 [Enter] [D]다운 [Q]종료");
+            }
             break;
     }
     
     char status_bar_text[max_x + 1];
     snprintf(status_bar_text, sizeof(status_bar_text), " %s | %s", help_str, g_status_msg);
     
-    mvprintw(max_y - 1, 0, "%.*s", max_x, status_bar_text);
+    mvprintw(status_bar_y, 0, "%.*s", max_x, status_bar_text);
     attroff(COLOR_PAIR(11));
+
+    draw_debug_log(max_y, max_x);
 
     refresh();
 }
@@ -282,6 +309,11 @@ void draw_tui() {
  * @brief 키 입력을 처리합니다.
  */
 void handle_keys(int ch) {
+    if (g_show_debug) {
+        clear_debug_log();
+        add_debug_log("KEY: %s", get_key_str(ch));
+    }
+    client_log(LOG_DEBUG, "Key press handled: %s", get_key_str(ch));
     g_status_msg[0] = '\0';
     switch (g_focus_zone) {
         case ZONE_PATH:
@@ -359,8 +391,14 @@ void handle_keys(int ch) {
                 case KEY_ENTER: case 10:
                     if (g_file_list[g_selected_item].type == 'd') {
                         cd_client(g_sock_main, g_file_list[g_selected_item].filename);
+                    } else if (g_file_list[g_selected_item].type == 'f') {
+                        if (is_binary(g_file_list[g_selected_item].filename)) {
+                             snprintf(g_status_msg, 100, "미리보기 불가");
+                        } else {
+                            show_remote_file(g_file_list[g_selected_item].filename);
+                        }
                     } else {
-                        snprintf(g_status_msg, 100, "디렉터리가 아닙니다.");
+                        snprintf(g_status_msg, 100, "디렉터리 또는 파일이 아닙니다.");
                     }
                     break;
                 case ' ':
@@ -375,3 +413,111 @@ void handle_keys(int ch) {
             break;
     }
 }
+
+// Private helper function to display content in a scrollable viewer
+void show_content_viewer(const char* title, const char* content) {
+    if (!content) {
+        snprintf(g_status_msg, 100, "내용이 없습니다.");
+        return;
+    }
+    
+    // 파일 내용을 줄 단위로 분리
+    char** lines = NULL;
+    int line_count = 0;
+    char* content_copy = strdup(content);
+    if (!content_copy) {
+        snprintf(g_status_msg, 100, "메모리 할당 실패.");
+        return;
+    }
+
+    char* line = strtok(content_copy, "\n");
+    while (line) {
+        lines = (char**)realloc(lines, (line_count + 1) * sizeof(char*));
+        if (!lines) {
+            snprintf(g_status_msg, 100, "메모리 할당 실패.");
+            free(content_copy);
+            return;
+        }
+        lines[line_count++] = line;
+        line = strtok(NULL, "\n");
+    }
+
+    int max_y, max_x;
+    int scroll_pos = 0;
+    int ch;
+
+    while (1) {
+        getmaxyx(stdscr, max_y, max_x);
+        int content_height = max_y - 2;
+        erase();
+
+        attron(COLOR_PAIR(11));
+        mvprintw(0, 0, "%*s", max_x, " ");
+        mvprintw(0, 0, "%s", title);
+        attroff(COLOR_PAIR(11));
+
+        for (int i = 0; i < content_height; i++) {
+            if (scroll_pos + i < line_count) {
+                mvprintw(i + 1, 0, "%.*s", max_x, lines[scroll_pos + i]);
+            }
+        }
+
+        attron(COLOR_PAIR(11));
+        mvprintw(max_y - 1, 0, "%*s", max_x, " ");
+        mvprintw(max_y - 1, 0, "[↑↓]스크롤 [Enter/Q]나가기");
+        attroff(COLOR_PAIR(11));
+
+        refresh();
+        ch = getch();
+
+        if (ch == KEY_UP && scroll_pos > 0) scroll_pos--;
+        else if (ch == KEY_DOWN && scroll_pos + content_height < line_count) scroll_pos++;
+        else if (ch == '\n' || ch == KEY_ENTER || ch == 'q' || ch == 'Q') break;
+    }
+
+    free(content_copy);
+    if (lines) free(lines);
+}
+
+void show_remote_file(const char* filename) {
+    size_t content_size = 0;
+    char* content = cat_client_fetch(g_sock_main, filename, &content_size);
+    if (!content) {
+        snprintf(g_status_msg, 100, "파일 내용을 불러오지 못했습니다.");
+        return;
+    }
+    
+    char title[100];
+    snprintf(title, sizeof(title), "파일 미리보기: %s", filename);
+    show_content_viewer(title, content);
+    free(content);
+}
+
+void show_local_file(const char* local_path) {
+    FILE* fp = fopen(local_path, "r");
+    if (!fp) {
+        snprintf(g_status_msg, 100, "로그 파일을 열 수 없습니다: %s", local_path);
+        return;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    long fsize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    char* content = malloc(fsize + 1);
+    if (!content) {
+        fclose(fp);
+        snprintf(g_status_msg, 100, "메모리 할당 실패.");
+        return;
+    }
+    
+    fread(content, 1, fsize, fp);
+    fclose(fp);
+    content[fsize] = 0;
+
+    char title[100];
+    snprintf(title, sizeof(title), "로그 파일: %s", local_path);
+    show_content_viewer(title, content);
+    free(content);
+}
+

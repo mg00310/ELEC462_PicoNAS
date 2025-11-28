@@ -1,6 +1,9 @@
-*.mp3
-*.mp4
-*.pdf
-*.png
-client
+# Compiled executables
 server
+client
+
+
+
+# Log files
+*.log
+logs/

@@ -63,6 +63,7 @@ void do_auth(ClientState* state, char* buffer);
 void do_ls(ClientState* state);
 void do_cd(ClientState* state, char* buffer);
 void do_get(ClientState* state, char* buffer);
+void do_cat(ClientState* state, char* buffer);
 void get_perm_str(mode_t mode, char *str);
 int write_full(int sock, const void* buf, size_t len);
 
@@ -159,6 +160,10 @@ void* handle_client(void* arg) {
              if (!state->is_authed) write(sock, RESP_ERR, 4);
             else do_get(state, buffer);
         }
+        else if (strncmp(buffer, CMD_CAT, 4) == 0) { 
+             if (!state->is_authed) write(sock, RESP_ERR, 4);
+            else do_cat(state, buffer);
+        }
         else {
             write(sock, RESP_ERR, 4);
         }
@@ -230,29 +235,36 @@ void do_cd(ClientState* state, char* buffer) {
     strncpy(dirname, path_ptr, sizeof(dirname) - 1);
     dirname[sizeof(dirname) - 1] = '\0';
 
-    char target_path[MAX_PATH * 2], resolved_path[MAX_PATH];
+    char target_path[MAX_PATH * 2];
+    char resolved_path[MAX_PATH];
 
-    if (dirname[0] == '/') {
-        server_log("Socket %d CD (절대경로) 요청: \"%s\"\n", state->sock, dirname);
-        strncpy(target_path, dirname, sizeof(target_path) - 1);
-        target_path[sizeof(target_path) - 1] = 0; 
-    }
-    else if (strcmp(dirname, "..") == 0) {
-        server_log("Socket %d CD (상대경로 '..') 요청\n", state->sock);
+    server_log("Socket %d CD 요청: \"%s\"\n", state->sock, dirname);
+
+    if (strcmp(dirname, "..") == 0) {
         if (strcmp(state->curr_path, state->root_path) == 0) {
-             strcpy(target_path, state->root_path);
-        } else {
-            strcpy(target_path, state->curr_path);
-            char* last_slash = strrchr(target_path, '/');
-            if (last_slash != NULL && last_slash != target_path) *last_slash = '\0';
-            else if (last_slash == target_path && strlen(target_path) > 1) target_path[1] = '\0';
-            else strcpy(target_path, state->root_path);
+            // 루트 디렉토리에서는 ".." 이동 불가
+            write(state->sock, RESP_ERR, 4);
+            server_log("Socket %d CD-UP 금지: 이미 루트 디렉토리\n", state->sock);
+            return;
         }
-    } 
-    else {
-        server_log("Socket %d CD (상대경로 '%s') 요청\n", state->sock, dirname);
+        // 현재 경로에서 마지막 '/'를 찾아 부모 디렉토리 경로 생성
+        strcpy(target_path, state->curr_path);
+        char* last_slash = strrchr(target_path, '/');
+        if (last_slash != NULL && last_slash != target_path) {
+            *last_slash = '\0'; // 마지막 /를 널 문자로 대체
+        } else if (last_slash == target_path && strlen(target_path) > 1) {
+            // "/dir" 같은 경우 "/"로 이동
+            target_path[1] = '\0';
+        }
+    } else if (dirname[0] == '/') {
+        // 클라이언트가 보낸 절대 경로는 그대로 사용
+        strncpy(target_path, dirname, sizeof(target_path) -1);
+    } else {
+        // 상대 경로는 현재 경로에 덧붙임
         snprintf(target_path, sizeof(target_path), "%s/%s", state->curr_path, dirname);
     }
+    target_path[sizeof(target_path) - 1] = '\0';
+
 
     if (realpath(target_path, resolved_path) == NULL) {
         server_log("Socket %d realpath 실패: (Invalid Target: %s)\n", state->sock, target_path);
@@ -260,22 +272,37 @@ void do_cd(ClientState* state, char* buffer) {
         return;
     }
 
-    // 'Jail' 탈출 방지: 해석된 경로가 루트 경로 내에 있는지 확인
-    if (strncmp(resolved_path, state->root_path, strlen(state->root_path)) != 0) {
-        server_log("Socket %d Jail 탈출 시도: (Resolved: %s) (Root: %s)\n", state->sock, resolved_path, state->root_path);
-        write(state->sock, RESP_ERR, 4); 
-        return;
-    }
+        // 'Jail' 탈출 방지: 해석된 경로가 루트 경로 내에 있는지 확인
 
-    struct stat st;
-    if (stat(resolved_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
-        server_log("Socket %d 'stat' 실패 또는 디렉터리 아님: (Resolved: %s)\n", state->sock, resolved_path);
-        write(state->sock, RESP_ERR, 4); 
-        return;
-    }
+        if (strncmp(resolved_path, state->root_path, strlen(state->root_path)) != 0) {
 
-    server_log("Socket %d CD 성공 -> RESP_OK 전송 (New Path: %s)\n", state->sock, resolved_path);
-    strcpy(state->curr_path, resolved_path);
+            server_log("Socket %d Jail 탈출 시도: (Resolved: %s) (Root: %s) -> RESP_ERR 전송\n", state->sock, resolved_path, state->root_path);
+
+            write(state->sock, RESP_ERR, 4); 
+
+            return;
+
+        }
+
+    
+
+        struct stat st;
+
+        if (stat(resolved_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+
+            server_log("Socket %d 'stat' 실패 또는 디렉터리 아님: (Resolved: %s) -> RESP_ERR 전송\n", state->sock, resolved_path);
+
+            write(state->sock, RESP_ERR, 4); 
+
+            return;
+
+        }
+
+    
+
+        server_log("Socket %d CD 성공 -> RESP_OK 전송 (New Path: %s)\n", state->sock, resolved_path);
+
+        strcpy(state->curr_path, resolved_path);
     
     uint32_t curr_len = htonl(strlen(state->curr_path));
     write_full(state->sock, RESP_OK, 4);
@@ -353,24 +380,37 @@ void do_ls(ClientState* state) {
  * @brief 'GET' 명령어를 처리하여 파일을 클라이언트에 전송합니다.
  */
 void do_get(ClientState* state, char* buffer) {
-    char full_path[MAX_PATH];
     if (strlen(buffer) < 5) {
         write(state->sock, RESP_ERR, 4); return;
     }
 
-    char* path_ptr = buffer + 4;
+    char* path_ptr = buffer + 4; // CMD_GET is 4 chars
     while (*path_ptr && isspace((unsigned char)*path_ptr)) {
         path_ptr++;
     }
-    strncpy(full_path, path_ptr, sizeof(full_path) - 1);
-    full_path[sizeof(full_path) - 1] = '\0';
     
-    char resolved_path[MAX_PATH];
-    server_log("Socket %d GET 요청: %s\n", state->sock, full_path);
+    char filename_from_client[MAX_PATH]; // Use a temporary variable to hold the parsed path
+    strncpy(filename_from_client, path_ptr, sizeof(filename_from_client) - 1);
+    filename_from_client[sizeof(filename_from_client) - 1] = '\0';
 
+    char target_path[MAX_PATH * 2];
+    char resolved_path[MAX_PATH];
+
+    server_log("Socket %d GET 요청: %s\n", state->sock, filename_from_client); // Log the client's original request
+
+    // 경로 유형에 따라 target_path를 다르게 구성
+    if (filename_from_client[0] == '/') {
+        // 클라이언트가 보낸 절대 경로는 그대로 사용
+        strncpy(target_path, filename_from_client, sizeof(target_path) - 1);
+    } else {
+        // 상대 경로는 현재 경로에 덧붙임
+        snprintf(target_path, sizeof(target_path), "%s/%s", state->curr_path, filename_from_client);
+    }
+    target_path[sizeof(target_path) - 1] = '\0'; // Ensure null-termination
+    
     // 1. realpath()로 실제 경로 해석
-    if (realpath(full_path, resolved_path) == NULL) {
-        server_log("Socket %d GET realpath 실패: %s -> %s\n", state->sock, full_path, strerror(errno));
+    if (realpath(target_path, resolved_path) == NULL) {
+        server_log("Socket %d GET realpath 실패: %s -> %s\n", state->sock, target_path, strerror(errno));
         write(state->sock, RESP_ERR, 4); return;
     }
 
@@ -409,8 +449,71 @@ void do_get(ClientState* state, char* buffer) {
     }
     close(fd);
     
-    server_log("Socket %d 파일 전송 완료: %s\n", state->sock, full_path);
+    server_log("Socket %d 파일 전송 완료: %s\n", state->sock, resolved_path);
 }
+
+/**
+ * @brief 'CAT' 명령어를 처리하여 파일 내용을 클라이언트에 전송합니다.
+ */
+void do_cat(ClientState* state, char* buffer) {
+    char filename[MAX_PATH];
+    if (strlen(buffer) < 5) {
+        write(state->sock, RESP_ERR, 4); return;
+    }
+
+    char* path_ptr = buffer + 4;
+    while (*path_ptr && isspace((unsigned char)*path_ptr)) {
+        path_ptr++;
+    }
+    
+    char target_path[MAX_PATH * 2];
+    snprintf(target_path, sizeof(target_path), "%s/%s", state->curr_path, path_ptr);
+
+    char resolved_path[MAX_PATH];
+    server_log("Socket %d CAT 요청: %s\n", state->sock, target_path);
+
+    if (realpath(target_path, resolved_path) == NULL) {
+        server_log("Socket %d CAT realpath 실패: %s -> %s\n", state->sock, target_path, strerror(errno));
+        write(state->sock, RESP_ERR, 4); return;
+    }
+
+    // 2. 'Jail' 탈출 방지
+    if (strncmp(resolved_path, state->root_path, strlen(state->root_path)) != 0) {
+        server_log("Socket %d CAT Jail 탈출 시도: %s -> RESP_ERR 전송\n", state->sock, resolved_path);
+        write(state->sock, RESP_ERR, 4); return;
+    }
+    
+    // 3. 파일 상태 확인 (일반 파일인지)
+    struct stat st;
+    if (stat(resolved_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        server_log("Socket %d CAT stat 실패 또는 일반 파일 아님: %s -> RESP_ERR 전송\n", state->sock, resolved_path);
+        write(state->sock, RESP_ERR, 4); return;
+    }
+
+    // 4. 파일 열기
+    int fd = open(resolved_path, O_RDONLY);
+    if (fd == -1) {
+        server_log("Socket %d CAT open 실패: %s -> %s -> RESP_ERR 전송\n", state->sock, resolved_path, strerror(errno));
+        write(state->sock, RESP_ERR, 4); return;
+    }
+
+    // 5. 파일 전송 시작 응답 (헤더 + 파일 크기)
+    server_log("Socket %d CAT 성공 -> RESP_OK 전송, 파일 내용 전송 시작: %s (크기: %ld)\n", state->sock, resolved_path, st.st_size);
+    write_full(state->sock, RESP_OK, 4);
+
+    char file_buffer[4096];
+    ssize_t bytes_read;
+    while ((bytes_read = read(fd, file_buffer, sizeof(file_buffer))) > 0) {
+        if (write_full(state->sock, file_buffer, bytes_read) != 0) {
+            break; 
+        }
+    }
+    close(fd);
+    
+    write_full(state->sock, RESP_CAT_E, 4);
+    server_log("Socket %d 파일 내용 전송 완료: %s\n", state->sock, resolved_path);
+}
+
 
 /**
  * @brief 파일 권한(mode_t)을 "rwxr-xr--" 형태의 문자열로 변환합니다.

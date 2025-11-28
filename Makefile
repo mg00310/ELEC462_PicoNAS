@@ -12,7 +12,7 @@ SERVER_BIN = server
 SERVER_LIBS = -pthread
 
 # 클라이언트 관련
-CLIENT_SRC = client_main.c client_ui.c client_net.c client_utils.c
+CLIENT_SRC = client_main.c client_ui.c client_net.c client_utils.c client_log.c client_debug.c
 CLIENT_BIN = client
 # [수정] 클라이언트 라이브러리 (ncurses와 pthread 모두 필요)
 CLIENT_LIBS = -lncursesw -pthread

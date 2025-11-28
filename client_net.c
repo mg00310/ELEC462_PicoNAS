@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "client.h"
 
 // --- 프로토콜 (서버 통신) ---
@@ -10,16 +11,16 @@ int auth_client(int sock) {
     get_password(pass, MAX_NAME);
     strcpy(g_user, user); strcpy(g_pass, pass);
     snprintf(buffer, sizeof(buffer), "%s %s %s", CMD_AUTH, user, pass);
-    if (write(sock, buffer, strlen(buffer)) <= 0) return 0;
-    if (read_full(sock, resp, 4) != 0) return 0;
+    if (log_socket_write(sock, buffer, strlen(buffer)) <= 0) return 0;
+    if (log_socket_read(sock, resp, 4) != 0) return 0;
     if (strncmp(resp, RESP_OK, 4) == 0) {
-        if (read_full(sock, &net_len, sizeof(uint32_t)) != 0) return 0;
+        if (log_socket_read(sock, &net_len, sizeof(uint32_t)) != 0) return 0;
         len = ntohl(net_len);
-        if (read_full(sock, g_root_path, len) != 0) return 0;
+        if (log_socket_read(sock, g_root_path, len) != 0) return 0;
         g_root_path[len] = 0;
-        if (read_full(sock, &net_len, sizeof(uint32_t)) != 0) return 0;
+        if (log_socket_read(sock, &net_len, sizeof(uint32_t)) != 0) return 0;
         len = ntohl(net_len);
-        if (read_full(sock, g_current_path, len) != 0) return 0;
+        if (log_socket_read(sock, g_current_path, len) != 0) return 0;
         g_current_path[len] = 0;
         return 1;
     }
@@ -27,28 +28,46 @@ int auth_client(int sock) {
 }
 
 void request_list(int sock) {
+    client_log(LOG_DEBUG, "CMD: LS - listing files in current directory");
     char resp[5] = {0};
     uint32_t net_file_count;
     if (g_file_list) free(g_file_list);
     g_file_list = NULL;
     g_file_count = 0; g_selected_item = 0; g_scroll_offset = 0;
     g_focus_zone = ZONE_LIST;
-    if (write(sock, CMD_LS, 4) <= 0) handle_error("write(LS) 에러");
-    if (read_full(sock, resp, 4) != 0) return;
+    if (log_socket_write(sock, CMD_LS, 4) <= 0) {
+        client_log(LOG_ERROR, "write(LS) failed: %s", strerror(errno));
+        handle_error("write(LS) 에러");
+    }
+    if (log_socket_read(sock, resp, 4) != 0) {
+        client_log(LOG_ERROR, "read_full(LS_S) failed");
+        return;
+    }
     if (strncmp(resp, RESP_LS_S, 4) != 0) {
+        client_log(LOG_WARN, "Invalid response for LS_S: %s", resp);
         snprintf(g_status_msg, 100, "LS 응답 수신 실패"); return;
     }
-    if (read_full(sock, &net_file_count, sizeof(uint32_t)) != 0) return;
+    if (log_socket_read(sock, &net_file_count, sizeof(uint32_t)) != 0) {
+        client_log(LOG_ERROR, "read_full(file_count) failed");
+        return;
+    }
     g_file_count = ntohl(net_file_count);
+    client_log(LOG_INFO, "LS received %d files", g_file_count);
     if (g_file_count == 0) {
-        read_full(sock, resp, 4);
+        log_socket_read(sock, resp, 4);
         return;
     }
     g_file_list = malloc(g_file_count * sizeof(struct FileInfo));
-    if (g_file_list == NULL) handle_error("malloc() 에러");
+    if (g_file_list == NULL) {
+        client_log(LOG_FATAL, "malloc for file list failed");
+        handle_error("malloc() 에러");
+    }
     ssize_t target_size = g_file_count * sizeof(struct FileInfo);
-    if (read_full(sock, g_file_list, target_size) != 0) handle_error("read(structs) 에러");
-    read_full(sock, resp, 4); 
+    if (log_socket_read(sock, g_file_list, target_size) != 0) {
+        client_log(LOG_ERROR, "read_full(file_list structs) failed");
+        handle_error("read(structs) 에러");
+    }
+    log_socket_read(sock, resp, 4); // LS_E
     for (int i = 0; i < g_file_count; i++) {
         g_file_list[i].is_selected = 0;
         g_file_list[i].is_downloaded = 0;
@@ -57,21 +76,132 @@ void request_list(int sock) {
 }
 
 void cd_client(int sock, const char* dirname) {
+    client_log(LOG_INFO, "CMD: CD to '%s'", dirname);
     char buffer[MAX_PATH * 2], resp[5] = {0};
     uint32_t net_len, len;
     snprintf(buffer, sizeof(buffer), "%s %s", CMD_CD, dirname);
-    if (write(sock, buffer, strlen(buffer)) <= 0) return;
-    if (read_full(sock, resp, 4) != 0) return;
+    if (log_socket_write(sock, buffer, strlen(buffer)) <= 0) {
+        client_log(LOG_ERROR, "write(CD) failed: %s", strerror(errno));
+        return;
+    }
+    if (log_socket_read(sock, resp, 4) != 0) {
+        client_log(LOG_ERROR, "read_full(CD response) failed");
+        return;
+    }
+
+
     if (strncmp(resp, RESP_OK, 4) == 0) {
-        if (read_full(sock, &net_len, sizeof(uint32_t)) != 0) return;
+        if (log_socket_read(sock, &net_len, sizeof(uint32_t)) != 0) return;
         len = ntohl(net_len);
-        if (read_full(sock, g_current_path, len) != 0) return;
+        if (log_socket_read(sock, g_current_path, len) != 0) return;
         g_current_path[len] = 0;
+        client_log(LOG_INFO, "CD successful, new path: %s", g_current_path);
         request_list(sock);
     } else {
+        client_log(LOG_WARN, "CD failed by server for dir '%s'", dirname);
         snprintf(g_status_msg, 100, "디렉터리 이동 불가.");
     }
 }
+
+char* cat_client_fetch(int sock, const char* filename, size_t* content_size) {
+    client_log(LOG_INFO, "CMD: CAT for file '%s'", filename);
+    char cmd_buffer[MAX_PATH * 2];
+    char resp[5] = {0};
+    snprintf(cmd_buffer, sizeof(cmd_buffer), "%s %s", CMD_CAT, filename);
+
+    if (log_socket_write(sock, cmd_buffer, strlen(cmd_buffer)) <= 0) {
+        client_log(LOG_ERROR, "write(CAT) failed: %s", strerror(errno));
+        if (content_size) *content_size = 0;
+        return NULL;
+    }
+
+    if (log_socket_read(sock, resp, 4) != 0) {
+        client_log(LOG_ERROR, "read_full(CAT response) failed");
+        if (content_size) *content_size = 0;
+        return NULL;
+    }
+
+
+
+    if (strncmp(resp, RESP_OK, 4) != 0) {
+        client_log(LOG_WARN, "CAT failed by server for file '%s'", filename);
+        if (content_size) *content_size = 0;
+        return NULL;
+    }
+
+    client_log(LOG_DEBUG, "CAT for '%s' starting.", filename);
+    // Allocate initial buffer
+    size_t current_capacity = 4096; // Initial buffer size
+    char* content_buffer = (char*)malloc(current_capacity);
+    if (!content_buffer) {
+        client_log(LOG_FATAL, "malloc for CAT buffer failed");
+        if (content_size) *content_size = 0;
+        return NULL;
+    }
+    size_t current_length = 0;
+
+    char data_chunk[4096];
+    ssize_t bytes_read;
+
+    while (1) {
+        // Use the raw 'read' here, not debug_read, to avoid spamming the debug panel
+        bytes_read = read(sock, data_chunk, sizeof(data_chunk));
+
+        if (bytes_read <= 0) {
+            client_log(LOG_ERROR, "read() during CAT failed or connection closed prematurely. Bytes read: %ld", bytes_read);
+            free(content_buffer);
+            if (content_size) *content_size = 0;
+            return NULL;
+        }
+
+        // Append new data first
+        if (current_length + bytes_read + 1 > current_capacity) {
+            size_t new_capacity = current_capacity * 2;
+            if (new_capacity < current_length + bytes_read + 1) {
+                new_capacity = current_length + bytes_read + 1;
+            }
+            char* temp_buffer = (char*)realloc(content_buffer, new_capacity);
+            if (!temp_buffer) {
+                client_log(LOG_FATAL, "realloc for CAT buffer failed on chunk append");
+                free(content_buffer);
+                if (content_size) *content_size = 0;
+                return NULL;
+            }
+            content_buffer = temp_buffer;
+            current_capacity = new_capacity;
+        }
+        memcpy(content_buffer + current_length, data_chunk, bytes_read);
+        current_length += bytes_read;
+
+        // Now, search for the end marker in the combined buffer
+        // To optimize, we only need to search in the area where the marker could possibly be (near the end of the previous data and the new chunk)
+        char* search_start = content_buffer;
+        if (current_length > sizeof(data_chunk) + 4) {
+             search_start = content_buffer + current_length - sizeof(data_chunk) - 4;
+        }
+       
+        char* end_marker_pos = memmem(search_start, content_buffer + current_length - search_start, RESP_CAT_E, 4);
+
+        if (end_marker_pos != NULL) {
+            size_t final_len = end_marker_pos - content_buffer;
+            
+            char* final_buffer = (char*)realloc(content_buffer, final_len + 1);
+            if (!final_buffer) {
+                 client_log(LOG_FATAL, "final realloc for CAT buffer failed");
+                 free(content_buffer);
+                 if (content_size) *content_size = 0;
+                 return NULL;
+            }
+            final_buffer[final_len] = '\0';
+            
+            if (content_size) *content_size = final_len;
+            client_log(LOG_DEBUG, "CAT for '%s' finished successfully. Total size: %zu bytes.", filename, final_len);
+            add_debug_log("<- RECV: [file content, %zu bytes]", final_len);
+            return final_buffer;
+        }
+    }
+}
+
 
 // --- 다운로드 로직 ---
 void* download_thread(void* arg) {

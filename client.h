@@ -15,6 +15,8 @@
 #include <fcntl.h>
 #include <wchar.h>
 #include <locale.h>
+#include <signal.h>
+#include <errno.h>
 #include "common.h"
 
 // --- 상수 정의 ---
@@ -77,6 +79,8 @@ extern char g_path_segs[MAX_PATH_SEGMENTS][MAX_NAME];
 extern char g_path_routes[MAX_PATH_SEGMENTS][MAX_PATH];
 extern int g_path_count;
 extern int g_path_index;
+extern volatile sig_atomic_t g_cmd_mode;
+extern int g_debug_level;
 
 // --- 다운로드 완료 큐 ---
 #define MAX_COMPLETED_QUEUE 50
@@ -90,16 +94,20 @@ extern int g_completed_count;
 // client_main.c
 void init_tui();
 void close_tui();
+void sigint_handler(int signo);
 
 // client_ui.c
 void draw_tui();
 void handle_keys(int ch);
 void scroll_text(int y, int x, const char* text, int max_width);
+void show_remote_file(const char* filename);
+void show_local_file(const char* local_path);
 
 // client_net.c
 int auth_client(int sock);
 void request_list(int sock);
 void cd_client(int sock, const char* dirname);
+char* cat_client_fetch(int sock, const char* filename, size_t* content_size);
 void* download_thread(void* arg);
 void start_downloads();
 
@@ -109,6 +117,7 @@ size_t get_mb_len(const char *s);
 int read_full(int sock, void* buf, size_t len);
 void get_password(char* pass, int max_len);
 void format_size(char *buf, size_t buf_size, int64_t size_in_bytes);
+int is_binary(const char* filename);
 void sort_list();
 int compare_files(const void* a, const void* b);
 void parse_path();
@@ -116,4 +125,29 @@ void init_queue();
 void add_queue(const char* filename);
 void check_queue();
 
+// client_log.c
+enum LogLevel { LOG_INFO, LOG_DEBUG, LOG_WARN, LOG_ERROR, LOG_FATAL };
+void client_log(int level, const char *format, ...);
+int init_client_log();
+void close_client_log();
+
+// client_debug.c
+void enter_cmd_mode();
+void init_debug_log();
+void add_debug_log(const char* format, ...);
+void clear_debug_log();
+const char* get_key_str(int ch);
+ssize_t log_socket_write(int sock, const void *buf, size_t count);
+ssize_t log_socket_read(int sock, void *buf, size_t count);
+void draw_debug_log(int max_y, int max_x);
+
+
 #endif // CLIENT_H
+
+// --- 디버그 패널 관련 ---
+#define DEBUG_MSG_COUNT 10
+#define DEBUG_MSG_LENGTH 256
+extern int g_show_debug;
+extern char g_debug_log[DEBUG_MSG_COUNT][DEBUG_MSG_LENGTH];
+extern int g_debug_idx;
+extern pthread_mutex_t g_debug_mutex;

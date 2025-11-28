@@ -1,4 +1,34 @@
 #include "client.h"
+#include <strings.h> // For strcasecmp
+
+// 미리보기 불가능한 파일 확장자 목록
+static const char* unviewable_extensions[] = {
+    ".mp3", ".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv",
+    ".pdf", ".zip", ".tar", ".gz", ".7z", ".rar",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".ico",
+    ".exe", ".bin", ".dll", ".so", ".o", ".a",
+    ".sqlite", ".db", ".dat", ".class", ".jar",
+    NULL // 리스트의 끝을 표시
+};
+
+/**
+ * @brief 파일 확장자를 기반으로 터미널에서 미리보기 불가능한 파일인지 확인합니다.
+ * @param filename 확인할 파일 이름.
+ * @return 미리보기 불가능하면 1, 가능하면 0.
+ */
+int is_binary(const char* filename) {
+    const char* dot = strrchr(filename, '.');
+    // 확장자가 없거나, 파일명 시작이 .이거나, 확장자가 1글자 이하인 경우 (예: .bashrc, .profile은 뷰 가능으로 간주)
+    if (!dot || dot == filename || strlen(dot) < 2) return 0;
+
+    for (int i = 0; unviewable_extensions[i] != NULL; i++) {
+        if (strcasecmp(dot, unviewable_extensions[i]) == 0) {
+            return 1; // 미리보기 불가능한 확장자 발견
+        }
+    }
+    return 0; // 미리보기 가능한 확장자
+}
+
 
 // --- 유틸리티 함수 ---
 void handle_error(const char *message) {
