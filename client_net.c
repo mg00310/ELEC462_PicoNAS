@@ -1,4 +1,15 @@
 #include "client.h"
+#include <unistd.h>
+#include <errno.h>
+#include <byteswap.h>
+
+#include <endian.h>
+#ifndef htobe64
+#define htobe64(x) __builtin_bswap64(x)
+#endif
+#ifndef be64toh
+#define be64toh(x) __builtin_bswap64(x)
+#endif
 
 void* download_dir_thread(void* arg);
 
@@ -294,12 +305,15 @@ void start_downloads() {
 
 void* download_dir_thread(void* arg) {
     struct DownloadArgs* args = (struct DownloadArgs*)arg;
+    
+    // args->file_info에 서버의 디렉터리 정보가 담겨 있습니다.
     char buffer[4096], resp[5] = {0};
     char full_path[MAX_PATH];
-
-    // 요청할 전체 경로 생성
+    
+    // 인증 및 경로 설정 후 서버에 요청할 전체 경로 생성
+    // (예: /users/jm/data/mydir)
     snprintf(full_path, sizeof(full_path),
-             "%s/%s", args->curr_path, args->file_info.filename);
+              "%s/%s", args->curr_path, args->file_info.filename);
 
     // 서버 연결
     int sock = socket(PF_INET, SOCK_STREAM, 0);
@@ -315,17 +329,25 @@ void* download_dir_thread(void* arg) {
         return NULL;
     }
 
-    // 인증
+    // 인증 시도
     snprintf(buffer, sizeof(buffer), "%s %s %s", CMD_AUTH, g_user, g_pass);
     write(sock, buffer, strlen(buffer));
 
-    read_full(sock, resp, 4);
+    // 인증 응답 수신
+    if (read_full(sock, resp, 4) != 0 || strncmp(resp, RESP_OK, 4) != 0) {
+        snprintf(g_status_msg, 100, "폴더 다운로드 실패(인증)");
+        close(sock);
+        free(args);
+        return NULL;
+    }
 
+    // 서버의 루트 경로 및 현재 경로 길이/내용 무시
     uint32_t net_len, len;
     read_full(sock, &net_len, 4); len = ntohl(net_len); read_full(sock, buffer, len);
     read_full(sock, &net_len, 4); len = ntohl(net_len); read_full(sock, buffer, len);
 
-    // GETDIR 요청
+
+    // GETDIR 요청 전송
     snprintf(buffer, sizeof(buffer), "%s %s", CMD_GETDIR, full_path);
     write(sock, buffer, strlen(buffer));
 
@@ -343,28 +365,46 @@ void* download_dir_thread(void* arg) {
     read_full(sock, &size_net, sizeof(size_net));
     uint64_t total_size = be64toh(size_net);
 
-    // 저장 이름
-    char save_name[300];
+    // 저장 이름 (폴더 이름.tar)
+    char save_name[MAX_FILENAME + 5]; // +5 for ".tar\0"
     snprintf(save_name, sizeof(save_name), "%s.tar", args->file_info.filename);
 
+    // 로컬 저장 경로 구성 (다운로드 디렉터리/폴더 이름.tar)
     char savepath[MAX_PATH];
-    snprintf(savepath, sizeof(savepath), "%s/%s", g_download_dir, item.filename);
+    // ******* 앞서의 'item' undeclared 오류를 해결한 수정된 부분 *******
+    snprintf(savepath, sizeof(savepath), "%s/%s", g_download_dir, save_name);
+    // ************************************************************
+    
     int fd = open(savepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        snprintf(g_status_msg, 100, "파일 저장 실패: %s", strerror(errno));
+        close(sock);
+        free(args);
+        return NULL;
+    }
 
 
-    // 본문 다운로드
+    // 본문 (tar 파일) 다운로드
     uint64_t received = 0;
     while (received < total_size) {
         ssize_t r = read(sock, buffer, sizeof(buffer));
         if (r <= 0) break;
-        write(fd, buffer, r);
-        received += r;
+        
+        ssize_t w = write(fd, buffer, r);
+        if (w <= 0) break; // 쓰기 실패
+        
+        received += w;
     }
 
     close(fd);
     close(sock);
     free(args);
-
-    snprintf(g_status_msg, 100, "폴더 다운로드 완료: %s", save_name);
+    
+    if (received == total_size) {
+        snprintf(g_status_msg, 100, "폴더 다운로드 완료: %s", save_name);
+    } else {
+         snprintf(g_status_msg, 100, "폴더 다운로드 실패 (전송 불완전)");
+    }
+    
     return NULL;
 }
