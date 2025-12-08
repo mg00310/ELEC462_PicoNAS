@@ -204,13 +204,9 @@ void draw_tui() {
                 case COL_TIME:
                     mvprintw(screen_y, current_x, "| %-16s", item->mod_time_str); break;
                 case COL_SIZE:
-                    if (item->type == 'd' || item->type == 'l' || item->size < 0) {
-                        mvprintw(screen_y, current_x, "| %8s ", "");
-                    } else {
-                        char size_buf[10];
-                        format_size(size_buf, 10, item->size);
-                        mvprintw(screen_y, current_x, "| %8s", size_buf);
-                    }
+                    char size_buf[10];
+                    format_size(size_buf, 10, item->size);
+                    mvprintw(screen_y, current_x, "| %8s", size_buf);
                     break;
                 case COL_OWNER:
                     mvprintw(screen_y, current_x, "| %-8s", item->owner); break;
@@ -338,6 +334,10 @@ void handle_keys(int ch) {
                     g_sort_mode = (g_sort_mode + 1) % 4;
                     sort_list();
                     break;
+                case 'S': case 's':
+                    download_path_mode();
+                    break;
+
                 case 'd': case 'D':
                     g_sort_order *= -1;
                     sort_list();

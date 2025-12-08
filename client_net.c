@@ -347,7 +347,10 @@ void* download_dir_thread(void* arg) {
     char save_name[300];
     snprintf(save_name, sizeof(save_name), "%s.tar", args->file_info.filename);
 
-    int fd = open(save_name, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    char savepath[MAX_PATH];
+    snprintf(savepath, sizeof(savepath), "%s/%s", g_download_dir, item.filename);
+    int fd = open(savepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
 
     // 본문 다운로드
     uint64_t received = 0;

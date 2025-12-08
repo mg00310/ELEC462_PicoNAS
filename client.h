@@ -17,7 +17,6 @@
 #include <locale.h>
 #include "common.h"
 
-// --- 상수 정의 ---
 #define MAX_PATH_SEGMENTS 32
 
 #define ZONE_LIST 0
@@ -31,26 +30,24 @@
 
 enum OptionalColumn { COL_TIME, COL_SIZE, COL_OWNER, COL_GROUP, COL_PERM, NUM_OPT_COLS };
 
+// 다운로드 저장 위치
+extern char g_download_dir[MAX_PATH];
+
 struct DownloadArgs {
     struct FileInfo file_info;
     char curr_path[MAX_PATH];
 };
 
-// --- 다운로드 진행 상태 추적 ---
 #define MAX_ACTIVE_DOWNLOADS 10
-// 다운로드 진행률 표시를 위한 구조체
 struct DownStatus {
     char filename[MAX_FILENAME];
-    double progress; // 0.0 ~ 1.0
-    int active;      // 활성화 여부 
+    double progress;
+    int active;
 };
 
 extern struct DownStatus g_down_prog[MAX_ACTIVE_DOWNLOADS];
 extern pthread_mutex_t g_prog_mutex;
 
-
-
-// --- 전역 변수 선언 ---
 extern struct FileInfo *g_file_list;
 extern int g_file_count;
 extern int g_selected_item;
@@ -78,37 +75,36 @@ extern char g_path_routes[MAX_PATH_SEGMENTS][MAX_PATH];
 extern int g_path_count;
 extern int g_path_index;
 
-// --- 다운로드 완료 큐 ---
+// 완료 큐
 #define MAX_COMPLETED_QUEUE 50
 extern pthread_mutex_t g_completed_mutex;
 extern char g_completed_queue[MAX_COMPLETED_QUEUE][MAX_FILENAME];
 extern int g_completed_count;
 
-
-// --- 함수 프로토타입 선언 ---
-
-// client_main.c
+// main
 void init_tui();
 void close_tui();
 
-// client_ui.c
+// ui
 void draw_tui();
 void handle_keys(int ch);
 void scroll_text(int y, int x, const char* text, int max_width);
 
-// client_net.c
+void download_path_mode();   // ★ 추가
+
+// net
 int auth_client(int sock);
 void request_list(int sock);
 void cd_client(int sock, const char* dirname);
 void* download_thread(void* arg);
 void start_downloads();
 
-// client_utils.c
+// utils
 void handle_error(const char *message);
 size_t get_mb_len(const char *s);
 int read_full(int sock, void* buf, size_t len);
 void get_password(char* pass, int max_len);
-void format_size(char *buf, size_t buf_size, int64_t size_in_bytes);
+void format_size(char *buf, size_t buf_size, int64_t size);
 void sort_list();
 int compare_files(const void* a, const void* b);
 void parse_path();
@@ -116,7 +112,8 @@ void init_queue();
 void add_queue(const char* filename);
 void check_queue();
 
-// client_upload.c
+// upload ui
 void upload_mode();
-void upload_file_to_server(const char* localpath, const char* servername );
-#endif // CLIENT_H
+void upload_file_to_server(const char* local,const char* name);
+
+#endif

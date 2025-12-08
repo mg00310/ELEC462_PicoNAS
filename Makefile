@@ -17,6 +17,9 @@ CLIENT_BIN = client
 # [수정] 클라이언트 라이브러리 (ncurses와 pthread 모두 필요)
 CLIENT_LIBS = -lncursesw -pthread
 
+CLIENT_SRC = client_main.c client_ui.c client_net.c client_utils.c client_upload.c client_download_path.c
+
+
 # 기본 타겟: all (서버와 클라이언트 모두 빌드)
 all: $(SERVER_BIN) $(CLIENT_BIN)
 
