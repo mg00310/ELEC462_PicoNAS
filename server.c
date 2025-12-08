@@ -1,6 +1,8 @@
 /*
  * server.c - Pico NAS 서버
  */
+#define _XOPEN_SOURCE 700
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,8 +19,21 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <errno.h>
-#include <ctype.h>
+#include <ctype.h>  
+#include <ftw.h>
 #include "common.h"
+
+#include <endian.h>
+#include <sys/wait.h>
+#include <libgen.h>
+
+#ifndef htobe64
+#define htobe64(x) __builtin_bswap64(x)
+#endif
+#ifndef be64toh
+#define be64toh(x) __builtin_bswap64(x)
+#endif
+
 
 // 로그용 뮤텍스
 pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -64,14 +79,26 @@ void do_ls(ClientState* state);
 void do_cd(ClientState* state, char* buffer);
 void do_get(ClientState* state, char* buffer);
 void do_cat(ClientState* state, char* buffer);
+void do_put(ClientState* state, char* buffer);
+void do_getdir(ClientState* state, char* buffer);
 void get_perm_str(mode_t mode, char *str);
 int write_full(int sock, const void* buf, size_t len);
 
 // --- 서버 메인 ---
-int main() {
+int main(int argc, char* argv[]) {
     int serv_sock, clnt_sock;
     struct sockaddr_in serv_addr, clnt_addr;
     socklen_t clnt_addr_size;
+    int port = PORT;
+
+    if (argc > 1) {
+        int custom_port = atoi(argv[1]);
+        if (custom_port > 0 && custom_port < 65536) port = custom_port;
+        else {
+            fprintf(stderr, "에러: 유효하지 않은 포트 번호입니다: %s\n", argv[1]);
+            exit(1);
+        }
+    }
     
     serv_sock = socket(PF_INET, SOCK_STREAM, 0);
     int option = 1;
@@ -79,7 +106,7 @@ int main() {
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    serv_addr.sin_port = htons(PORT);
+    serv_addr.sin_port = htons(port);
     
     if (bind(serv_sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
         server_log("bind() 에러: %s\n", strerror(errno)); 
@@ -90,7 +117,7 @@ int main() {
         exit(1);
     }
     
-    server_log("Pico NAS 서버 시작... (Port: %d)\n", PORT);
+    server_log("Pico NAS 서버 시작... (Port: %d)\n", port);
     
     while (1) {
         clnt_addr_size = sizeof(clnt_addr);
@@ -145,28 +172,26 @@ void* handle_client(void* arg) {
         buffer[strcspn(buffer, "\n")] = 0; 
         server_log("Socket %d 수신: \"%s\"\n", sock, buffer);
 
-        if (strncmp(buffer, CMD_AUTH, 4) == 0) {
-            do_auth(state, buffer);
+        if (strncmp(buffer, CMD_AUTH, 4) == 0) do_auth(state, buffer);
+        else if (strncmp(buffer, CMD_LS, 2) == 0) {
+            if (!state->is_authed) write(sock, RESP_ERR, 4); else do_ls(state);
         }
-        else if (strncmp(buffer, CMD_LS, 4) == 0) {
-            if (!state->is_authed) write(sock, RESP_ERR, 4);
-            else do_ls(state);
+        else if (strncmp(buffer, CMD_CD, 2) == 0) {
+            if (!state->is_authed) write(sock, RESP_ERR, 4); else do_cd(state, buffer);
         }
-        else if (strncmp(buffer, CMD_CD, 4) == 0) {
-             if (!state->is_authed) write(sock, RESP_ERR, 4);
-            else do_cd(state, buffer);
+        else if (strncmp(buffer, CMD_GET, 3) == 0) { 
+            if (!state->is_authed) write(sock, RESP_ERR, 4); else do_get(state, buffer);
         }
-        else if (strncmp(buffer, CMD_GET, 4) == 0) { 
-             if (!state->is_authed) write(sock, RESP_ERR, 4);
-            else do_get(state, buffer);
+        else if (strncmp(buffer, CMD_CAT, 3) == 0) { 
+            if (!state->is_authed) write(sock, RESP_ERR, 4); else do_cat(state, buffer);
         }
-        else if (strncmp(buffer, CMD_CAT, 4) == 0) { 
-             if (!state->is_authed) write(sock, RESP_ERR, 4);
-            else do_cat(state, buffer);
+        else if (strncmp(buffer, CMD_PUT, 3) == 0) {
+            if (!state->is_authed) write(state->sock, RESP_ERR, 4); else do_put(state, buffer);
         }
-        else {
-            write(sock, RESP_ERR, 4);
+        else if (strncmp(buffer, CMD_GETDIR, 4) == 0) {
+            if (!state->is_authed) write(state->sock, RESP_ERR, 4); else do_getdir(state, buffer);
         }
+        else write(sock, RESP_ERR, 4);
     }
     
     server_log("클라이언트 (Socket %d) 연결 종료.\n", sock);
@@ -310,6 +335,25 @@ void do_cd(ClientState* state, char* buffer) {
     write_full(state->sock, state->curr_path, strlen(state->curr_path));
 }
 
+#include <ftw.h>
+
+static uint64_t dir_size_accum;
+
+int nftw_cb(const char* fpath, const struct stat* sb,
+            int typeflag, struct FTW* ftwbuf)
+{
+    if (typeflag == FTW_F)
+        dir_size_accum += sb->st_size;
+    return 0;
+}
+
+uint64_t calc_dir_size(const char* path) {
+    dir_size_accum = 0;
+    nftw(path, nftw_cb, 20, FTW_PHYS);
+    return dir_size_accum;
+}
+
+
 /**
  * @brief 'LS' 명령어를 처리하여 현재 디렉터리의 파일 목록을 전송합니다.
  */
@@ -354,7 +398,11 @@ void do_ls(ClientState* state) {
             i++; continue;
         }
         strncpy(item->filename, entry->d_name, MAX_FILENAME);
-        item->size = st.st_size;
+        if (S_ISDIR(st.st_mode)) {
+            item->size = calc_dir_size(full_path);
+        } else {
+            item->size = st.st_size;
+        }
         get_perm_str(st.st_mode, item->permissions);
         if (S_ISDIR(st.st_mode)) item->type = 'd';
         else if (S_ISLNK(st.st_mode)) item->type = 'l';
@@ -380,9 +428,7 @@ void do_ls(ClientState* state) {
  * @brief 'GET' 명령어를 처리하여 파일을 클라이언트에 전송합니다.
  */
 void do_get(ClientState* state, char* buffer) {
-    if (strlen(buffer) < 5) {
-        write(state->sock, RESP_ERR, 4); return;
-    }
+    if (strlen(buffer) < 5) { write(state->sock, RESP_ERR, 4); return; }
 
     char* path_ptr = buffer + 4; // CMD_GET is 4 chars
     while (*path_ptr && isspace((unsigned char)*path_ptr)) {
@@ -452,14 +498,118 @@ void do_get(ClientState* state, char* buffer) {
     server_log("Socket %d 파일 전송 완료: %s\n", state->sock, resolved_path);
 }
 
+void do_put(ClientState* state, char* buffer) {
+    char filename[MAX_FILENAME];
+    char fullpath[MAX_PATH];
+
+    // PUT filename 파싱
+    sscanf(buffer + 4, "%s", filename);
+    snprintf(fullpath, sizeof(fullpath), "%s/%s", state->curr_path, filename);
+
+    // Jail 검사
+    char resolved[MAX_PATH];
+    realpath(state->curr_path, resolved);
+    if (strncmp(resolved, state->root_path, strlen(state->root_path)) != 0) {
+        write(state->sock, RESP_ERR, 4);
+        return;
+    }
+
+    // 서버에서 저장할 파일 열기
+    int fd = open(fullpath, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    if (fd < 0) { write(state->sock, RESP_ERR, 4); return; }
+
+    write(state->sock, RESP_PUT_S, 4);   // 업로드 시작 승인
+
+    // filesize 수신
+    int64_t file_size_net;
+    read(state->sock, &file_size_net, sizeof(file_size_net));
+    int64_t filesize = be64toh(file_size_net);
+
+    char buf[4096];
+    int64_t recvbytes = 0;
+    while(recvbytes < filesize) {
+        ssize_t r = read(state->sock, buf, sizeof(buf));
+        if (r <= 0) break;
+        write(fd, buf, r);
+        recvbytes += r;
+    }
+    close(fd);
+
+    write(state->sock, RESP_PUT_E, 4); // 완료 응답
+    server_log("업로드 완료: %s (%ld bytes)\n", filename, filesize);
+}
+
+
+void do_getdir(ClientState* state, char* buffer) {
+    // 1. GETDIR 파라미터 파싱
+    char full_path[MAX_PATH];
+    char* p = buffer + 4;
+    while (*p == ' ') p++;
+    strncpy(full_path, p, sizeof(full_path) - 1);
+    full_path[sizeof(full_path)-1] = '\0';
+
+    char resolved[MAX_PATH];
+    if (realpath(full_path, resolved) == NULL) {
+        write(state->sock, RESP_ERR, 4);
+        return;
+    }
+
+    // 2. Jail 체크
+    if (strncmp(resolved, state->root_path, strlen(state->root_path)) != 0) {
+        write(state->sock, RESP_ERR, 4);
+        return;
+    }
+
+    // 3. 디렉터리인지 확인
+    struct stat st;
+    if (stat(resolved, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        write(state->sock, RESP_ERR, 4);
+        return;
+    }
+
+    // 4. tar 파일 생성
+    char tmp_tar[256];
+    snprintf(tmp_tar, sizeof(tmp_tar), "/tmp/piconas_%d.tar", getpid());
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("tar", "tar", "-cf", tmp_tar, "-C",
+               dirname(resolved), basename(resolved), NULL);
+        exit(1);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+
+    // 5. tar 크기 전송
+    struct stat ts;
+    stat(tmp_tar, &ts);
+    uint64_t size = ts.st_size;
+    uint64_t size_net = htobe64(size);
+
+    write_full(state->sock, RESP_GETDIR_S, 4);
+    write_full(state->sock, &size_net, sizeof(size_net));
+
+    // 6. tar 파일 내용 전송
+    int fd = open(tmp_tar, O_RDONLY);
+    char buf[4096];
+    ssize_t r;
+    while ((r = read(fd, buf, sizeof(buf))) > 0) {
+        write_full(state->sock, buf, r);
+    }
+    close(fd);
+
+    // 7. 임시 tar 삭제
+    unlink(tmp_tar);
+
+    server_log("폴더 전송 완료: %s\n", resolved);
+}
+
+
 /**
  * @brief 'CAT' 명령어를 처리하여 파일 내용을 클라이언트에 전송합니다.
  */
 void do_cat(ClientState* state, char* buffer) {
-    char filename[MAX_PATH];
-    if (strlen(buffer) < 5) {
-        write(state->sock, RESP_ERR, 4); return;
-    }
+    if (strlen(buffer) < 5) { write(state->sock, RESP_ERR, 4); return; }
 
     char* path_ptr = buffer + 4;
     while (*path_ptr && isspace((unsigned char)*path_ptr)) {

@@ -1,9 +1,17 @@
-# Compiled executables
+# 컴파일된 실행 파일
 server
 client
 
-
-
-# Log files
+# 로그 파일
 *.log
 logs/
+
+# 미디어 및 문서 파일
+*.mp3
+*.mp4
+*.pdf
+*.png
+
+# 다운로드 폴더
+Downloads/*
+!Downloads/.gitkeep

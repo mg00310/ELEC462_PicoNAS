@@ -11,10 +11,13 @@
 
 // --- 2. 프로토콜 명령어 (Client -> Server) ---
 #define CMD_AUTH "AUTH" // + [user] [pass]
-#define CMD_LS   "LS  " // (현재 디렉터리 요청)
+#define CMD_LS   "LS"   // (현재 디렉터리 요청)
 #define CMD_CD   "CD  " // + [dirname]
 #define CMD_GET  "GET " // + [filename] (Phase 4에서 사용)
 #define CMD_CAT  "CAT " // + [filename]
+#define CMD_GETDIR "GDIR"
+#define CMD_PUT "PUT "
+
 
 // --- 3. 프로토콜 응답 (Server -> Client) ---
 #define RESP_OK   "OK  "
@@ -23,6 +26,9 @@
 #define RESP_LS_E "LS_E" // 'LS' 종료
 #define RESP_GET_S "GET_S" // 'GET' 시작: + (int64_t)file_size
 #define RESP_CAT_E "CAT_E" // 'CAT' 종료
+#define RESP_GETDIR_S "GDIR_S"
+#define RESP_PUT_S "PUT_S"
+#define RESP_PUT_E "PUT_E"
 
 /*
  * AUTH, CD 응답 프로토콜

@@ -19,7 +19,6 @@
 #include <errno.h>
 #include "common.h"
 
-// --- 상수 정의 ---
 #define MAX_PATH_SEGMENTS 32
 
 #define ZONE_LIST 0
@@ -32,6 +31,7 @@
 #define SORT_TYPE 3
 
 enum OptionalColumn { COL_TIME, COL_SIZE, COL_OWNER, COL_GROUP, COL_PERM, NUM_OPT_COLS };
+extern char g_download_dir[1024];
 
 struct DownloadArgs {
     struct FileInfo file_info;
@@ -50,9 +50,6 @@ struct DownStatus {
 extern struct DownStatus g_down_prog[MAX_ACTIVE_DOWNLOADS];
 extern pthread_mutex_t g_prog_mutex;
 
-
-
-// --- 전역 변수 선언 ---
 extern struct FileInfo *g_file_list;
 extern int g_file_count;
 extern int g_selected_item;
@@ -82,14 +79,11 @@ extern int g_path_index;
 extern volatile sig_atomic_t g_cmd_mode;
 extern int g_debug_level;
 
-// --- 다운로드 완료 큐 ---
+// 완료 큐
 #define MAX_COMPLETED_QUEUE 50
 extern pthread_mutex_t g_completed_mutex;
 extern char g_completed_queue[MAX_COMPLETED_QUEUE][MAX_FILENAME];
 extern int g_completed_count;
-
-
-// --- 함수 프로토타입 선언 ---
 
 // client_main.c
 void init_tui();
@@ -102,6 +96,9 @@ void handle_keys(int ch);
 void scroll_text(int y, int x, const char* text, int max_width);
 void show_remote_file(const char* filename);
 void show_local_file(const char* local_path);
+
+// client_download_path.c
+void download_path_mode();
 
 // client_net.c
 int auth_client(int sock);
@@ -141,6 +138,10 @@ ssize_t log_socket_write(int sock, const void *buf, size_t count);
 ssize_t log_socket_read(int sock, void *buf, size_t count);
 void draw_debug_log(int max_y, int max_x);
 
+// client_upload.c
+void upload_mode();
+void upload_file_to_server(const char* local,const char* name);
+
 
 #endif // CLIENT_H
 
@@ -151,3 +152,4 @@ extern int g_show_debug;
 extern char g_debug_log[DEBUG_MSG_COUNT][DEBUG_MSG_LENGTH];
 extern int g_debug_idx;
 extern pthread_mutex_t g_debug_mutex;
+

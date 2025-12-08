@@ -2,7 +2,6 @@
 #include <dirent.h>
 #include <stdarg.h>
 
-// Prototypes for local functions
 void show_log_list();
 const char* get_proto_str(const char* code, size_t len);
 
@@ -12,7 +11,7 @@ const char* get_proto_str(const char* code, size_t len);
  */
 void init_debug_log() {
     pthread_mutex_init(&g_debug_mutex, NULL);
-    clear_debug_log(); // Clear on init
+    clear_debug_log();
 }
 
 /**
@@ -71,7 +70,7 @@ void enter_cmd_mode() {
             show_log_list();
             break;
         case 'q':
-        case 27: // ESC key
+        case 27:
             snprintf(g_status_msg, sizeof(g_status_msg), " "); 
             break;
         default:
@@ -102,7 +101,7 @@ const char* get_proto_str(const char* code, size_t len) {
 }
 
 const char* get_key_str(int ch) {
-    if (ch >= 32 && ch <= 126) { // Printable ASCII
+    if (ch >= 32 && ch <= 126) {
         static char ascii_key[2] = {0};
         ascii_key[0] = (char)ch;
         return ascii_key;
@@ -121,7 +120,6 @@ const char* get_key_str(int ch) {
         case 27: return "ESC";
         case KEY_BACKSPACE: return "Backspace";
         case KEY_DC: return "Delete";
-        // Add more ncurses special keys as needed
         default:
             {
                 static char unknown_key[20];
