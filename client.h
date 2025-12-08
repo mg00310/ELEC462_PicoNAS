@@ -29,9 +29,9 @@
 #define SORT_TYPE 3
 
 enum OptionalColumn { COL_TIME, COL_SIZE, COL_OWNER, COL_GROUP, COL_PERM, NUM_OPT_COLS };
+void download_path_mode();
+extern char g_download_dir[1024];
 
-// 다운로드 저장 위치
-extern char g_download_dir[MAX_PATH];
 
 struct DownloadArgs {
     struct FileInfo file_info;

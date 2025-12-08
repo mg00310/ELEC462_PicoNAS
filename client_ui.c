@@ -334,14 +334,14 @@ void handle_keys(int ch) {
                     g_sort_mode = (g_sort_mode + 1) % 4;
                     sort_list();
                     break;
+                case 'd': case 'D':
+                    g_sort_order *= -1;
+                    sort_list();
+                    break;  
                 case 'S': case 's':
                     download_path_mode();
                     break;
 
-                case 'd': case 'D':
-                    g_sort_order *= -1;
-                    sort_list();
-                    break;
             }
             break;
         case ZONE_LIST:

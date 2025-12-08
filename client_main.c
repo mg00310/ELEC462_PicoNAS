@@ -17,7 +17,8 @@ char g_current_path[MAX_PATH] = "/";
 char g_root_path[MAX_PATH] = "/";
 time_t g_scroll_time = 0;
 long g_scroll_tick = 0;
-char g_download_dir[MAX_PATH] = "./";
+char g_download_dir[1024] = "./Downloads";
+
 
 int g_focus_zone = ZONE_LIST;
 int g_sort_mode = SORT_NAME;

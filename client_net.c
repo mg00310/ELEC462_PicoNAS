@@ -200,7 +200,11 @@ void* download_thread(void* arg) {
     if (read_full(sock, &file_size_net, sizeof(uint64_t)) != 0) { close(sock); goto cleanup; }
     file_size = be64toh(file_size_net);
 
-    int fd = open(item.filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    char savepath[MAX_PATH];
+    snprintf(savepath, sizeof(savepath), "%s/%s", g_download_dir, item.filename);
+
+    int fd = open(savepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
     if (fd == -1) {
         snprintf(g_status_msg, 100, "다운실패(%.30s...): 파일생성", item.filename);
         close(sock); goto cleanup;
