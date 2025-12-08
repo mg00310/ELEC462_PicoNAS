@@ -93,14 +93,26 @@ int main(int argc, char *argv[]) {
     }
     client_log(LOG_INFO, "--- Client Started ---");
 
-    if (argc != 2) {
-        fprintf(stderr, "사용법: %s <Server IP>\n", argv[0]); 
-        client_log(LOG_ERROR, "Invalid arguments: IP address required.");
+    if (argc < 2 || argc > 3) {
+        fprintf(stderr, "사용법: %s <Server IP> [Port]\n", argv[0]); 
+        client_log(LOG_ERROR, "Invalid arguments: IP address and optional port required.");
         exit(1);
     }
     strncpy(g_server_ip, argv[1], 15); g_server_ip[15] = 0;
+
+    int port = PORT;
+    if (argc == 3) {
+        int custom_port = atoi(argv[2]);
+        if (custom_port > 0 && custom_port < 65536) {
+            port = custom_port;
+        } else {
+            fprintf(stderr, "에러: 유효하지 않은 포트 번호입니다: %s\n", argv[2]);
+            client_log(LOG_ERROR, "Invalid port number provided: %s", argv[2]);
+            exit(1);
+        }
+    }
     
-    client_log(LOG_INFO, "Attempting to connect to server: %s", g_server_ip);
+    client_log(LOG_INFO, "Attempting to connect to server: %s:%d", g_server_ip, port);
     struct sockaddr_in serv_addr;
     g_sock_main = socket(PF_INET, SOCK_STREAM, 0);
     if (g_sock_main == -1) {
@@ -110,14 +122,14 @@ int main(int argc, char *argv[]) {
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = inet_addr(g_server_ip);
-    serv_addr.sin_port = htons(PORT);
+    serv_addr.sin_port = htons(port);
     if (connect(g_sock_main, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
         client_log(LOG_FATAL, "connect() error: %s", strerror(errno));
         handle_error("connect() 에러");
     }
     
-    client_log(LOG_INFO, "Connected to server (%s). Starting authentication.", argv[1]);
-    printf("서버(%s)에 연결됨. 인증을 시작합니다.\n", argv[1]);
+    client_log(LOG_INFO, "Connected to server (%s:%d). Starting authentication.", g_server_ip, port);
+    printf("서버(%s:%d)에 연결됨. 인증을 시작합니다.\n", g_server_ip, port);
     
     if (!auth_client(g_sock_main)) {
         client_log(LOG_ERROR, "Authentication failed (user: %s)", g_user);

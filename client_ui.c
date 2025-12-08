@@ -401,6 +401,9 @@ void handle_keys(int ch) {
                         snprintf(g_status_msg, 100, "디렉터리 또는 파일이 아닙니다.");
                     }
                     break;
+                case KEY_BACKSPACE: // 부모 디렉터리로 이동
+                    cd_client(g_sock_main, "..");
+                    break;
                 case ' ':
                     if (strcmp(g_file_list[g_selected_item].filename, "..") != 0) {
                         g_file_list[g_selected_item].is_selected = !g_file_list[g_selected_item].is_selected;
@@ -464,7 +467,7 @@ void show_content_viewer(const char* title, const char* content) {
 
         attron(COLOR_PAIR(11));
         mvprintw(max_y - 1, 0, "%*s", max_x, " ");
-        mvprintw(max_y - 1, 0, "[↑↓]스크롤 [Enter/Q]나가기");
+        mvprintw(max_y - 1, 0, "[↑↓]스크롤 [Enter/Q/ESC]나가기"); // Updated help text
         attroff(COLOR_PAIR(11));
 
         refresh();
@@ -472,7 +475,7 @@ void show_content_viewer(const char* title, const char* content) {
 
         if (ch == KEY_UP && scroll_pos > 0) scroll_pos--;
         else if (ch == KEY_DOWN && scroll_pos + content_height < line_count) scroll_pos++;
-        else if (ch == '\n' || ch == KEY_ENTER || ch == 'q' || ch == 'Q') break;
+        else if (ch == '\n' || ch == KEY_ENTER || ch == 'q' || ch == 'Q' || ch == 27) break; // Added 'ch == 27' for ESC
     }
 
     free(content_copy);

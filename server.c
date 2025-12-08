@@ -68,10 +68,21 @@ void get_perm_str(mode_t mode, char *str);
 int write_full(int sock, const void* buf, size_t len);
 
 // --- 서버 메인 ---
-int main() {
+int main(int argc, char* argv[]) {
     int serv_sock, clnt_sock;
     struct sockaddr_in serv_addr, clnt_addr;
     socklen_t clnt_addr_size;
+    int port = PORT; // 기본 포트
+
+    if (argc > 1) {
+        int custom_port = atoi(argv[1]);
+        if (custom_port > 0 && custom_port < 65536) {
+            port = custom_port;
+        } else {
+            fprintf(stderr, "에러: 유효하지 않은 포트 번호입니다: %s\n", argv[1]);
+            exit(1);
+        }
+    }
     
     serv_sock = socket(PF_INET, SOCK_STREAM, 0);
     int option = 1;
@@ -79,7 +90,7 @@ int main() {
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    serv_addr.sin_port = htons(PORT);
+    serv_addr.sin_port = htons(port);
     
     if (bind(serv_sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
         server_log("bind() 에러: %s\n", strerror(errno)); 
@@ -90,7 +101,7 @@ int main() {
         exit(1);
     }
     
-    server_log("Pico NAS 서버 시작... (Port: %d)\n", PORT);
+    server_log("Pico NAS 서버 시작... (Port: %d)\n", port);
     
     while (1) {
         clnt_addr_size = sizeof(clnt_addr);
@@ -456,7 +467,6 @@ void do_get(ClientState* state, char* buffer) {
  * @brief 'CAT' 명령어를 처리하여 파일 내용을 클라이언트에 전송합니다.
  */
 void do_cat(ClientState* state, char* buffer) {
-    char filename[MAX_PATH];
     if (strlen(buffer) < 5) {
         write(state->sock, RESP_ERR, 4); return;
     }
