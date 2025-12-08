@@ -371,6 +371,9 @@ void handle_keys(int ch) {
                 case 'D': case 'd':
                     start_downloads();
                     break;
+                case 'U': case 'u':
+                    upload_mode();
+                    break;
             }
             break;
     }

@@ -1,6 +1,8 @@
 /*
  * server.c - Pico NAS 서버
  */
+#define _XOPEN_SOURCE 700
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,8 +19,22 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <errno.h>
-#include <ctype.h>
+#include <ctype.h>  
+#include <ftw.h>
+
 #include "common.h"
+
+#include <endian.h>
+#include <sys/wait.h>
+#include <libgen.h>
+
+#ifndef htobe64
+#define htobe64(x) __builtin_bswap64(x)
+#endif
+#ifndef be64toh
+#define be64toh(x) __builtin_bswap64(x)
+#endif
+
 
 // 로그용 뮤텍스
 pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -63,6 +79,7 @@ void do_auth(ClientState* state, char* buffer);
 void do_ls(ClientState* state);
 void do_cd(ClientState* state, char* buffer);
 void do_get(ClientState* state, char* buffer);
+void do_put(ClientState* state, char* buffer);
 void do_getdir(ClientState* state, char* buffer);
 void get_perm_str(mode_t mode, char *str);
 int write_full(int sock, const void* buf, size_t len);
@@ -148,19 +165,23 @@ void* handle_client(void* arg) {
         if (strncmp(buffer, CMD_AUTH, 4) == 0) {
             do_auth(state, buffer);
         }
-        else if (strncmp(buffer, CMD_LS, 4) == 0) {
+        else if (strncmp(buffer, CMD_LS, 2) == 0) {
             if (!state->is_authed) write(sock, RESP_ERR, 4);
             else do_ls(state);
         }
-        else if (strncmp(buffer, CMD_CD, 4) == 0) {
+        else if (strncmp(buffer, CMD_CD, 2) == 0) {
              if (!state->is_authed) write(sock, RESP_ERR, 4);
             else do_cd(state, buffer);
         }
-        else if (strncmp(buffer, CMD_GET, 4) == 0) { 
+        else if (strncmp(buffer, CMD_GET, 3) == 0) { 
              if (!state->is_authed) write(sock, RESP_ERR, 4);
             else do_get(state, buffer);
         }
-        else if (strncmp(buffer, CMD_GETDIR, 4) == 0) {
+        else if (strncmp(buffer, CMD_PUT, 3) == 0) {
+            if (!state->is_authed) write(state->sock, RESP_ERR, 4);
+            else do_put(state, buffer);
+        }
+        else if (strncmp(buffer, CMD_GETDIR, 6) == 0) {
             if (!state->is_authed) write(state->sock, RESP_ERR, 4);
             else do_getdir(state, buffer);
         }
@@ -439,6 +460,48 @@ void do_get(ClientState* state, char* buffer) {
     
     server_log("Socket %d 파일 전송 완료: %s\n", state->sock, full_path);
 }
+
+void do_put(ClientState* state, char* buffer) {
+    char filename[MAX_FILENAME];
+    char fullpath[MAX_PATH];
+
+    // PUT filename 파싱
+    sscanf(buffer + 4, "%s", filename);
+    snprintf(fullpath, sizeof(fullpath), "%s/%s", state->curr_path, filename);
+
+    // Jail 검사
+    char resolved[MAX_PATH];
+    realpath(state->curr_path, resolved);
+    if (strncmp(resolved, state->root_path, strlen(state->root_path)) != 0) {
+        write(state->sock, RESP_ERR, 4);
+        return;
+    }
+
+    // 서버에서 저장할 파일 열기
+    int fd = open(fullpath, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    if (fd < 0) { write(state->sock, RESP_ERR, 4); return; }
+
+    write(state->sock, RESP_PUT_S, 4);   // 업로드 시작 승인
+
+    // filesize 수신
+    int64_t file_size_net;
+    read(state->sock, &file_size_net, sizeof(file_size_net));
+    int64_t filesize = be64toh(file_size_net);
+
+    char buf[4096];
+    int64_t recvbytes = 0;
+    while(recvbytes < filesize) {
+        ssize_t r = read(state->sock, buf, sizeof(buf));
+        if (r <= 0) break;
+        write(fd, buf, r);
+        recvbytes += r;
+    }
+    close(fd);
+
+    write(state->sock, RESP_PUT_E, 4); // 완료 응답
+    server_log("업로드 완료: %s (%ld bytes)\n", filename, filesize);
+}
+
 
 void do_getdir(ClientState* state, char* buffer) {
     // 1. GETDIR 파라미터 파싱

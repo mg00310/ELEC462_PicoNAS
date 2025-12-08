@@ -116,4 +116,7 @@ void init_queue();
 void add_queue(const char* filename);
 void check_queue();
 
+// client_upload.c
+void upload_mode();
+void upload_file_to_server(const char* localpath, const char* servername );
 #endif // CLIENT_H

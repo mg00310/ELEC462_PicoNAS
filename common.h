@@ -11,11 +11,14 @@
 
 // --- 2. 프로토콜 명령어 (Client -> Server) ---
 #define CMD_AUTH "AUTH" // + [user] [pass]
-#define CMD_LS   "LS  " // (현재 디렉터리 요청)
+#define CMD_LS   "LS" // (현재 디렉터리 요청)
 #define CMD_CD   "CD  " // + [dirname]
 #define CMD_GET  "GET " // + [filename] (Phase 4에서 사용)
 #define CMD_GETDIR "GDIR"
+#define CMD_PUT "PUT "
 #define RESP_GETDIR_S "GDIR"
+#define RESP_PUT_S "PUTS_S"
+#define RESP_PUT_E "PUTS_E"
 
 // --- 3. 프로토콜 응답 (Server -> Client) ---
 #define RESP_OK   "OK  "

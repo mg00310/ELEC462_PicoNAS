@@ -28,6 +28,54 @@ int auth_client(int sock) {
     return 0;
 }
 
+void upload_file(const char* localfile, const char* servername){
+    int sock = socket(PF_INET, SOCK_STREAM, 0);
+
+    struct sockaddr_in serv;
+    serv.sin_family = AF_INET;
+    serv.sin_port = htons(PORT);
+    serv.sin_addr.s_addr = inet_addr(g_server_ip);
+
+    connect(sock,(struct sockaddr*)&serv,sizeof(serv));
+
+    // 인증
+    char buf[2048], resp[5]={0};
+    sprintf(buf,"%s %s %s", CMD_AUTH, g_user, g_pass);
+    write(sock,buf,strlen(buf));
+    read(sock,resp,4);
+
+    // 파일 열기
+    int fd=open(localfile,O_RDONLY);
+    if(fd<0){ snprintf(g_status_msg,100,"파일 없음"); return; }
+
+    sprintf(buf,"%s %s", CMD_PUT, servername);
+    write(sock,buf,strlen(buf));
+    read(sock,resp,4);
+
+    if(strncmp(resp,RESP_PUT_S,4)!=0){
+        snprintf(g_status_msg,100,"서버 업로드 거부");
+        close(fd);close(sock);return;
+    }
+
+    // 크기 전송
+    off_t size=lseek(fd,0,SEEK_END);
+    lseek(fd,0,SEEK_SET);
+    int64_t netsize=htobe64(size);
+    write(sock,&netsize,8);
+
+    // 파일 전송
+    ssize_t r; char filebuf[4096];
+    while((r=read(fd,filebuf,4096))>0) write(sock,filebuf,r);
+
+    read(sock,resp,4);
+    if(strncmp(resp,RESP_PUT_E,4)==0)
+        snprintf(g_status_msg,100,"업로드 완료!");
+    else
+        snprintf(g_status_msg,100,"업로드 실패!");
+
+    close(fd); close(sock);
+}
+
 void request_list(int sock) {
     char resp[5] = {0};
     uint32_t net_file_count;
