@@ -399,11 +399,7 @@ void do_ls(ClientState* state) {
         }
         strncpy(item->filename, entry->d_name, MAX_FILENAME);
         if (S_ISDIR(st.st_mode)) {
-            if (strcmp(state->curr_path, "/") == 0) {
-                item->size = 0; // 루트 디렉토리의 하위 디렉토리 크기 계산 비활성화
-            } else {
-                item->size = calc_dir_size(full_path);
-            }
+            item->size = 0; // 디렉토리 크기 계산 비활성화
         } else {
             item->size = st.st_size;
         }
