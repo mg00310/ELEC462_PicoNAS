@@ -360,69 +360,46 @@ uint64_t calc_dir_size(const char* path) {
 void do_ls(ClientState* state) {
     DIR *dir; struct dirent *entry; struct stat st;
     char full_path[MAX_PATH * 2];
-    int file_count = 0;
+
     dir = opendir(state->curr_path);
-    if (dir == NULL) { write(state->sock, RESP_ERR, 4); return; }
-    
-    // '.' 현재 디렉터리는 목록에서 제외
+    if (!dir) { write(state->sock, RESP_ERR, 4); return; }
+
+    // 파일 카운트 계산
+    int count = 0;
     while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0) continue;
-        // [Fix] WSL/Windows 호환성: 불필요한 'identifier' 파일 목록에서 제외
-        if (strcmp(entry->d_name, "identifier") == 0) continue;
-        file_count++;
+        if (entry->d_name[0] == '.') continue;
+        count++;
     }
-    closedir(dir);
+    rewinddir(dir); 
 
+    // 1) 시작 패킷
     write_full(state->sock, RESP_LS_S, 4);
-    uint32_t net_file_count = htonl(file_count);
-    write_full(state->sock, &net_file_count, sizeof(uint32_t));
-    if (file_count == 0) {
-        write_full(state->sock, RESP_LS_E, 4); return;
-    }
+    uint32_t c = htonl(count);
+    write_full(state->sock, &c, 4);
 
-    struct FileInfo *file_list = malloc(file_count * sizeof(struct FileInfo));
-    if (file_list == NULL) { return; } 
+    // 2) 파일 목록 개별 전송
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
 
-    dir = opendir(state->curr_path);
-    int i = 0;
-    while ((entry = readdir(dir)) != NULL && i < file_count) {
-        if (strcmp(entry->d_name, ".") == 0) continue;
-        // [Fix] WSL/Windows 호환성: 불필요한 'identifier' 파일 목록에서 제외
-        if (strcmp(entry->d_name, "identifier") == 0) continue;
-        struct FileInfo *item = &file_list[i];
-        memset(item, 0, sizeof(struct FileInfo));
         snprintf(full_path, sizeof(full_path), "%s/%s", state->curr_path, entry->d_name);
-        if (lstat(full_path, &st) == -1) {
-            strncpy(item->filename, entry->d_name, MAX_FILENAME);
-            strcpy(item->permissions, "?");
-            i++; continue;
-        }
-        strncpy(item->filename, entry->d_name, MAX_FILENAME);
-        if (S_ISDIR(st.st_mode)) {
-            item->size = calc_dir_size(full_path);
-        } else {
-            item->size = st.st_size;
-        }
-        get_perm_str(st.st_mode, item->permissions);
-        if (S_ISDIR(st.st_mode)) item->type = 'd';
-        else if (S_ISLNK(st.st_mode)) item->type = 'l';
-        else item->type = 'f';
-        struct passwd *pwd = getpwuid(st.st_uid);
-        if (pwd) strncpy(item->owner, pwd->pw_name, MAX_NAME);
-        else snprintf(item->owner, MAX_NAME, "%d", st.st_uid);
-        struct group *grp = getgrgid(st.st_gid);
-        if (grp) strncpy(item->group, grp->gr_name, MAX_NAME);
-        else snprintf(item->group, MAX_NAME, "%d", st.st_gid);
-        struct tm *tm_info = localtime(&st.st_mtime);
-        strftime(item->mod_time_str, 20, "%Y-%m-%d %H:%M", tm_info);
-        item->mod_time_raw = (int64_t)st.st_mtime;
-        i++;
+        stat(full_path, &st);
+
+        char type = S_ISDIR(st.st_mode)?'d':'f';
+        uint64_t size = htobe64((uint64_t)st.st_size);
+
+        // 파일명 길이 (가변 전송 가능)
+        uint32_t nameLen = htonl(strlen(entry->d_name));
+
+        write_full(state->sock, &type, 1);
+        write_full(state->sock, &size, 8);
+        write_full(state->sock, &nameLen, 4);
+        write_full(state->sock, entry->d_name, strlen(entry->d_name));
     }
-    closedir(dir);
-    write_full(state->sock, file_list, file_count * sizeof(struct FileInfo));
+
     write_full(state->sock, RESP_LS_E, 4);
-    free(file_list);
+    closedir(dir);
 }
+
 
 /**
  * @brief 'GET' 명령어를 처리하여 파일을 클라이언트에 전송합니다.
@@ -502,42 +479,66 @@ void do_put(ClientState* state, char* buffer) {
     char filename[MAX_FILENAME];
     char fullpath[MAX_PATH];
 
-    // PUT filename 파싱
+    // 1. 파일명 파싱
     sscanf(buffer + 4, "%s", filename);
     snprintf(fullpath, sizeof(fullpath), "%s/%s", state->curr_path, filename);
 
-    // Jail 검사
-    char resolved[MAX_PATH];
-    realpath(state->curr_path, resolved);
-    if (strncmp(resolved, state->root_path, strlen(state->root_path)) != 0) {
+    // 2. Jail 확인 (curr_path 기반만 허용)
+    char resolved_curr[MAX_PATH];
+    if (!realpath(state->curr_path, resolved_curr)) {
+        write(state->sock, RESP_ERR, 4);
+        return;
+    }
+    if (strncmp(resolved_curr, state->root_path, strlen(state->root_path)) != 0) {
         write(state->sock, RESP_ERR, 4);
         return;
     }
 
-    // 서버에서 저장할 파일 열기
+    // 3. 파일 생성 (fail 시 확실한 반환)
     int fd = open(fullpath, O_WRONLY|O_CREAT|O_TRUNC, 0644);
-    if (fd < 0) { write(state->sock, RESP_ERR, 4); return; }
+    if (fd < 0) { 
+        write(state->sock, RESP_ERR, 4); 
+        return; 
+    }
 
-    write(state->sock, RESP_PUT_S, 4);   // 업로드 시작 승인
+    // 4. 업로드 시작 승인
+    if(write(state->sock, RESP_PUT_S, 4) <= 0){
+        close(fd); 
+        return;
+    }
 
-    // filesize 수신
-    int64_t file_size_net;
-    read(state->sock, &file_size_net, sizeof(file_size_net));
+    // 5. 파일 크기 수신 (fail 방지)
+    int64_t file_size_net = 0;
+    if (read_full(state->sock, &file_size_net, sizeof(file_size_net)) < 0) {
+        close(fd);
+        return;
+    }
     int64_t filesize = be64toh(file_size_net);
 
+    // 6. 파일 내용 수신 (부분패킷 포함 → 안정화)
     char buf[4096];
-    int64_t recvbytes = 0;
-    while(recvbytes < filesize) {
+    int64_t received = 0;
+
+    while(received < filesize){
         ssize_t r = read(state->sock, buf, sizeof(buf));
-        if (r <= 0) break;
-        write(fd, buf, r);
-        recvbytes += r;
+        if (r <= 0) {                          // 🔥 EOF/중단 감지
+            close(fd);
+            write(state->sock, RESP_ERR, 4);   // 클라이언트 block 방지
+            return;
+        }
+        if(write(fd, buf, r) != r){            // write 실패 예외 처리
+            close(fd);
+            write(state->sock, RESP_ERR, 4);
+            return;
+        }
+        received += r;
     }
     close(fd);
 
-    write(state->sock, RESP_PUT_E, 4); // 완료 응답
-    server_log("업로드 완료: %s (%ld bytes)\n", filename, filesize);
+    write(state->sock, RESP_PUT_E, 4);
+    server_log("✔ 업로드 완료: %s (%ld bytes)\n", filename, filesize);
 }
+
 
 
 void do_getdir(ClientState* state, char* buffer) {

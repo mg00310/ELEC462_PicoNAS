@@ -90,63 +90,75 @@ void upload_file(const char* localfile, const char* servername){
 
 void request_list(int sock) {
     client_log(LOG_DEBUG, "CMD: LS - listing files in current directory");
+
     char resp[5] = {0};
     uint32_t net_file_count;
+
     if (g_file_list) free(g_file_list);
     g_file_list = NULL;
     g_file_count = 0; g_selected_item = 0; g_scroll_offset = 0;
     g_focus_zone = ZONE_LIST;
-    if (log_socket_write(sock, CMD_LS, 4) <= 0) {
-        client_log(LOG_ERROR, "write(LS) failed: %s", strerror(errno));
-        handle_error("write(LS) 에러");
-    }
-    if (log_socket_read(sock, resp, 4) != 0) {
-        client_log(LOG_ERROR, "read_full(LS_S) failed");
+
+    // 1) 요청
+    log_socket_write(sock, CMD_LS, 4);
+
+    // 2) LS_S 수신
+    if (log_socket_read(sock, resp, 4) != 0 || strncmp(resp, RESP_LS_S, 4) != 0) {
+        snprintf(g_status_msg,100,"LS 응답 오류");
         return;
     }
-    if (strncmp(resp, RESP_LS_S, 4) != 0) {
-        client_log(LOG_WARN, "Invalid response for LS_S: %s", resp);
-        snprintf(g_status_msg, 100, "LS 응답 수신 실패"); return;
-    }
-    if (log_socket_read(sock, &net_file_count, sizeof(uint32_t)) != 0) {
-        client_log(LOG_ERROR, "read_full(file_count) failed");
-        return;
-    }
+
+    // 3) 파일 개수 수신
+    log_socket_read(sock,&net_file_count,4);
     g_file_count = ntohl(net_file_count);
-    client_log(LOG_INFO, "LS received %d files", g_file_count);
-    if (g_file_count == 0) {
-        log_socket_read(sock, resp, 4); // LS_E
+    if(g_file_count<=0){
+        log_socket_read(sock,resp,4); // LS_E consume
         return;
     }
-    g_file_list = malloc(g_file_count * sizeof(struct FileInfo));
-    if (g_file_list == NULL) {
-        client_log(LOG_FATAL, "malloc for file list failed");
-        handle_error("malloc() 에러");
+
+    g_file_list = calloc(g_file_count,sizeof(struct FileInfo));
+
+    for(int i=0;i<g_file_count;i++){
+        uint8_t type;
+        uint32_t nl;
+        // type
+        log_socket_read(sock,&type,1);
+        g_file_list[i].type = type;
+
+        // name length
+        log_socket_read(sock,&nl,4); nl = ntohl(nl);
+
+        // name
+        log_socket_read(sock,g_file_list[i].filename,nl);
+        g_file_list[i].filename[nl]=0;
+
+        // size
+        int64_t netsize;
+        log_socket_read(sock,&netsize,8);
+        g_file_list[i].size = be64toh(netsize);
+
+        // mod time(문자열 20bytes 가정)
+        log_socket_read(sock,g_file_list[i].mod_time_str,20);
+        g_file_list[i].mod_time_str[19]=0;
+
+        // owner/group/perm (각 32/32/12 bytes로 가정)
+        log_socket_read(sock,g_file_list[i].owner,32);
+        log_socket_read(sock,g_file_list[i].group,32);
+        log_socket_read(sock,g_file_list[i].permissions,12);
+
+        g_file_list[i].owner[31]=0;
+        g_file_list[i].group[31]=0;
+        g_file_list[i].permissions[11]=0;
+
+        g_file_list[i].is_selected = 0;
+        g_file_list[i].is_downloaded = 0;
     }
-    ssize_t target_size = g_file_count * sizeof(struct FileInfo);
-    if (log_socket_read(sock, g_file_list, target_size) != 0) {
-        client_log(LOG_ERROR, "read_full(file_list structs) failed");
-        handle_error("read(structs) 에러");
-    }
-    log_socket_read(sock, resp, 4);
-    
-    int filtered_count = 0;
-    for (int i = 0; i < g_file_count; i++) {
-        size_t len = strlen(g_file_list[i].filename);
-        if (len >= 10 && strcmp(g_file_list[i].filename + len - 10, "Identifier") == 0) {
-            continue;
-        }
-        if (filtered_count != i) {
-            g_file_list[filtered_count] = g_file_list[i];
-        }
-        g_file_list[filtered_count].is_selected = 0;
-        g_file_list[filtered_count].is_downloaded = 0;
-        filtered_count++;
-    }
-    g_file_count = filtered_count;
-    
+
+    log_socket_read(sock,resp,4); // LS_E
+
     sort_list();
 }
+
 
 void cd_client(int sock, const char* dirname) {
     client_log(LOG_INFO, "CMD: CD to '%s'", dirname);
