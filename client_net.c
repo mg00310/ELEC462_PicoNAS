@@ -1,9 +1,18 @@
-/*#define _GNU_SOURCE
 #include "client.h"
+#include <termios.h>
 #include <unistd.h>
 #include <errno.h>
 #include <byteswap.h>
 #include <endian.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>          
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
 
 #ifndef htobe64
 #define htobe64(x) __builtin_bswap64(x)
@@ -12,560 +21,66 @@
 #define be64toh(x) __builtin_bswap64(x)
 #endif
 
-void* download_dir_thread(void* arg);
-
-// --- 프로토콜 (서버 통신) ---
-int auth_client(int sock) {
-    char user[MAX_NAME], pass[MAX_NAME], buffer[MAX_PATH * 2], resp[5] = {0};
-    uint32_t net_len, len;
-    printf("사용자명: ");
-    fgets(user, MAX_NAME, stdin); user[strcspn(user, "\n")] = 0;
-    printf("비밀번호: ");
-    get_password(pass, MAX_NAME);
-    strcpy(g_user, user); strcpy(g_pass, pass);
-    snprintf(buffer, sizeof(buffer), "%s %s %s", CMD_AUTH, user, pass);
-    if (log_socket_write(sock, buffer, strlen(buffer)) <= 0) return 0;
-    if (log_socket_read(sock, resp, 4) != 0) return 0;
-    if (strncmp(resp, RESP_OK, 4) == 0) {
-        if (log_socket_read(sock, &net_len, sizeof(uint32_t)) != 0) return 0;
-        len = ntohl(net_len);
-        if (log_socket_read(sock, g_root_path, len) != 0) return 0;
-        g_root_path[len] = 0;
-        if (log_socket_read(sock, &net_len, sizeof(uint32_t)) != 0) return 0;
-        len = ntohl(net_len);
-        if (log_socket_read(sock, g_current_path, len) != 0) return 0;
-        g_current_path[len] = 0;
-        return 1;
-    }
-    return 0;
-}
-
-void upload_file(const char* localfile, const char* servername){
-    int sock = socket(PF_INET, SOCK_STREAM, 0);
-
-    struct sockaddr_in serv;
-    serv.sin_family = AF_INET;
-    serv.sin_port = htons(PORT);
-    serv.sin_addr.s_addr = inet_addr(g_server_ip);
-
-    connect(sock,(struct sockaddr*)&serv,sizeof(serv));
-
-    // 인증
-    char buf[2048], resp[5]={0};
-    sprintf(buf,"%s %s %s", CMD_AUTH, g_user, g_pass);
-    log_socket_write(sock,buf,strlen(buf));
-    log_socket_read(sock,resp,4);
-
-    // 파일 열기
-    int fd=open(localfile,O_RDONLY);
-    if(fd<0){ snprintf(g_status_msg,100,"파일 없음"); return; }
-
-    sprintf(buf,"%s %s", CMD_PUT, servername);
-    log_socket_write(sock,buf,strlen(buf));
-    log_socket_read(sock,resp,4);
-
-    if(strncmp(resp,RESP_PUT_S,4)!=0){
-        snprintf(g_status_msg,100,"서버 업로드 거부");
-        close(fd);close(sock);return;
-    }
-
-    // 크기 전송
-    off_t size=lseek(fd,0,SEEK_END);
-    lseek(fd,0,SEEK_SET);
-    int64_t netsize=htobe64(size);
-    log_socket_write(sock,&netsize,8);
-
-    // 파일 전송
-    ssize_t r; char filebuf[4096];
-    while((r=read(fd,filebuf,4096))>0) write(sock,filebuf,r);
-
-    log_socket_read(sock,resp,4);
-    if(strncmp(resp,RESP_PUT_E,4)==0)
-        snprintf(g_status_msg,100,"업로드 완료!");
-    else
-        snprintf(g_status_msg,100,"업로드 실패!");
-
-    close(fd); close(sock);
-}
-
-void request_list(int sock) {
-    client_log(LOG_DEBUG, "CMD: LS - listing files in current directory");
-
-    char resp[5] = {0};
-    uint32_t net_file_count;
-
-    if (g_file_list) free(g_file_list);
-    g_file_list = NULL;
-    g_file_count = 0; g_selected_item = 0; g_scroll_offset = 0;
-    g_focus_zone = ZONE_LIST;
-
-    // 1) 요청
-    log_socket_write(sock, CMD_LS, 4);
-
-    // 2) LS_S 수신
-    if (log_socket_read(sock, resp, 4) != 0 || strncmp(resp, RESP_LS_S, 4) != 0) {
-        snprintf(g_status_msg,100,"LS 응답 오류");
-        return;
-    }
-
-    // 3) 파일 개수 수신
-    log_socket_read(sock,&net_file_count,4);
-    g_file_count = ntohl(net_file_count);
-    if(g_file_count<=0){
-        log_socket_read(sock,resp,4); // LS_E consume
-        return;
-    }
-
-    g_file_list = calloc(g_file_count,sizeof(struct FileInfo));
-
-    for(int i=0;i<g_file_count;i++){
-        uint8_t type;
-        uint32_t nl;
-        // type
-        log_socket_read(sock,&type,1);
-        g_file_list[i].type = type;
-
-        // name length
-        log_socket_read(sock,&nl,4); nl = ntohl(nl);
-
-        // name
-        log_socket_read(sock,g_file_list[i].filename,nl);
-        g_file_list[i].filename[nl]=0;
-
-        // size
-        int64_t netsize;
-        log_socket_read(sock,&netsize,8);
-        g_file_list[i].size = be64toh(netsize);
-
-        // mod time(문자열 20bytes 가정)
-        log_socket_read(sock,g_file_list[i].mod_time_str,20);
-        g_file_list[i].mod_time_str[19]=0;
-
-        // owner/group/perm (각 32/32/12 bytes로 가정)
-        log_socket_read(sock,g_file_list[i].owner,32);
-        log_socket_read(sock,g_file_list[i].group,32);
-        log_socket_read(sock,g_file_list[i].permissions,12);
-
-        g_file_list[i].owner[31]=0;
-        g_file_list[i].group[31]=0;
-        g_file_list[i].permissions[11]=0;
-
-        g_file_list[i].is_selected = 0;
-        g_file_list[i].is_downloaded = 0;
-    }
-
-    log_socket_read(sock,resp,4); // LS_E
-
-    sort_list();
-}
-
-
-void cd_client(int sock, const char* dirname) {
-    client_log(LOG_INFO, "CMD: CD to '%s'", dirname);
-    char buffer[MAX_PATH * 2], resp[5] = {0};
-    uint32_t net_len, len;
-    snprintf(buffer, sizeof(buffer), "%s %s", CMD_CD, dirname);
-    if (log_socket_write(sock, buffer, strlen(buffer)) <= 0) {
-        client_log(LOG_ERROR, "write(CD) failed: %s", strerror(errno));
-        return;
-    }
-    if (log_socket_read(sock, resp, 4) != 0) {
-        client_log(LOG_ERROR, "read_full(CD response) failed");
-        return;
-    }
-
-
-    if (strncmp(resp, RESP_OK, 4) == 0) {
-        if (log_socket_read(sock, &net_len, sizeof(uint32_t)) != 0) return;
-        len = ntohl(net_len);
-        if (log_socket_read(sock, g_current_path, len) != 0) return;
-        g_current_path[len] = 0;
-        client_log(LOG_INFO, "CD successful, new path: %s", g_current_path);
-        request_list(sock);
-    } else {
-        client_log(LOG_WARN, "CD failed by server for dir '%s'", dirname);
-        snprintf(g_status_msg, 100, "디렉터리 이동 불가.");
-    }
-}
-
-char* cat_client_fetch(int sock, const char* filename, size_t* content_size) {
-    client_log(LOG_INFO, "CMD: CAT for file '%s'", filename);
-    char cmd_buffer[MAX_PATH * 2];
-    char resp[5] = {0};
-    snprintf(cmd_buffer, sizeof(cmd_buffer), "%s %s", CMD_CAT, filename);
-
-    if (log_socket_write(sock, cmd_buffer, strlen(cmd_buffer)) <= 0) {
-        client_log(LOG_ERROR, "write(CAT) failed: %s", strerror(errno));
-        if (content_size) *content_size = 0;
-        return NULL;
-    }
-
-    if (log_socket_read(sock, resp, 4) != 0) {
-        client_log(LOG_ERROR, "read_full(CAT response) failed");
-        if (content_size) *content_size = 0;
-        return NULL;
-    }
-
-    if (strncmp(resp, RESP_OK, 4) != 0) {
-        client_log(LOG_WARN, "CAT failed by server for file '%s'", filename);
-        if (content_size) *content_size = 0;
-        return NULL;
-    }
-
-    client_log(LOG_DEBUG, "CAT for '%s' starting.", filename);
-    size_t current_capacity = 4096;
-    char* content_buffer = (char*)malloc(current_capacity);
-    if (!content_buffer) {
-        client_log(LOG_FATAL, "malloc for CAT buffer failed");
-        if (content_size) *content_size = 0;
-        return NULL;
-    }
-    size_t current_length = 0;
-
-    char data_chunk[4096];
-    ssize_t bytes_read;
-
-    while (1) {
-        bytes_read = read(sock, data_chunk, sizeof(data_chunk));
-
-        if (bytes_read <= 0) {
-            client_log(LOG_ERROR, "read() during CAT failed or connection closed prematurely. Bytes read: %ld", bytes_read);
-            free(content_buffer);
-            if (content_size) *content_size = 0;
-            return NULL;
-        }
-
-        if (current_length + bytes_read + 1 > current_capacity) {
-            size_t new_capacity = current_capacity * 2;
-            if (new_capacity < current_length + bytes_read + 1) {
-                new_capacity = current_length + bytes_read + 1;
-            }
-            char* temp_buffer = (char*)realloc(content_buffer, new_capacity);
-            if (!temp_buffer) {
-                client_log(LOG_FATAL, "realloc for CAT buffer failed on chunk append");
-                free(content_buffer);
-                if (content_size) *content_size = 0;
-                return NULL;
-            }
-            content_buffer = temp_buffer;
-            current_capacity = new_capacity;
-        }
-        memcpy(content_buffer + current_length, data_chunk, bytes_read);
-        current_length += bytes_read;
-
-        char* search_start = content_buffer;
-        if (current_length > sizeof(data_chunk) + 4) {
-             search_start = content_buffer + current_length - sizeof(data_chunk) - 4;
-        }
-       
-        char* end_marker_pos = memmem(search_start, content_buffer + current_length - search_start, RESP_CAT_E, 4);
-
-        if (end_marker_pos != NULL) {
-            size_t final_len = end_marker_pos - content_buffer;
-            
-            char* final_buffer = (char*)realloc(content_buffer, final_len + 1);
-            if (!final_buffer) {
-                 client_log(LOG_FATAL, "final realloc for CAT buffer failed");
-                 free(content_buffer);
-                 if (content_size) *content_size = 0;
-                 return NULL;
-            }
-            final_buffer[final_len] = '\0';
-            
-            if (content_size) *content_size = final_len;
-            client_log(LOG_DEBUG, "CAT for '%s' finished successfully. Total size: %zu bytes.", filename, final_len);
-            add_debug_log("<- RECV: [file content, %zu bytes]", final_len);
-            return final_buffer;
-        }
-    }
-}
-
-
-// --- 다운로드 로직 ---
-void* download_thread(void* arg) {
-    struct DownloadArgs* args = (struct DownloadArgs*)arg;
-    struct FileInfo item = args->file_info;
-    char current_path[MAX_PATH];
-    strcpy(current_path, args->curr_path);
-    free(args);
-
-    int slot_index = -1;
-    pthread_mutex_lock(&g_prog_mutex);
-    for (int i = 0; i < MAX_ACTIVE_DOWNLOADS; i++) {
-        if (!g_down_prog[i].active) {
-            g_down_prog[i].active = 1;
-            strncpy(g_down_prog[i].filename, item.filename, MAX_FILENAME - 1);
-            g_down_prog[i].filename[MAX_FILENAME - 1] = '\0';
-            g_down_prog[i].progress = 0.0;
-            slot_index = i;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_prog_mutex);
-
-    if (slot_index == -1) {
-        snprintf(g_status_msg, 100, "최대 동시 다운로드 수 초과");
-        return NULL;
-    }
-
-    char buffer[4096]; char resp[5] = {0};
-    int64_t file_size;
-    int sock = socket(PF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = inet_addr(g_server_ip);
-    serv_addr.sin_port = htons(PORT);
-
-    if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
-        snprintf(g_status_msg, 100, "다운실패(%.30s...): 연결", item.filename);
-        goto cleanup;
-    }
-
-    snprintf(buffer, sizeof(buffer), "%s %s %s", CMD_AUTH, g_user, g_pass);
-    if (write(sock, buffer, strlen(buffer)) <= 0) { close(sock); goto cleanup; }
-    if (read_full(sock, resp, 4) != 0 || strncmp(resp, RESP_OK, 4) != 0) {
-        snprintf(g_status_msg, 100, "다운실패(%.30s...): 인증", item.filename);
-        close(sock); goto cleanup;
-    }
-    uint32_t net_len, len;
-    read_full(sock, &net_len, sizeof(uint32_t)); len = ntohl(net_len); read_full(sock, buffer, len);
-    read_full(sock, &net_len, sizeof(uint32_t)); len = ntohl(net_len); read_full(sock, buffer, len);
-    
-    char full_path[MAX_PATH];
-    snprintf(full_path, sizeof(full_path), "%s/%s", current_path, item.filename);
-    snprintf(buffer, sizeof(buffer), "%s %s", CMD_GET, full_path);
-
-    if (write(sock, buffer, strlen(buffer)) <= 0) { close(sock); goto cleanup; }
-    if (read_full(sock, resp, 4) != 0 || strncmp(resp, RESP_GET_S, 4) != 0) {
-        snprintf(g_status_msg, 100, "다운실패(%.30s...): 파일없음", item.filename);
-        close(sock); goto cleanup;
-    }
-
-    uint64_t file_size_net;
-    if (read_full(sock, &file_size_net, sizeof(uint64_t)) != 0) { close(sock); goto cleanup; }
-    file_size = be64toh(file_size_net);
-
-    char savepath[MAX_PATH];
-    snprintf(savepath, sizeof(savepath), "%s/%s", g_download_dir, item.filename);
-    int fd = open(savepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-
-    if (fd == -1) {
-        snprintf(g_status_msg, 100, "다운실패(%.30s...): 파일생성", item.filename);
-        close(sock); goto cleanup;
-    }
-
-    ssize_t bytes_read;
-    int64_t total_received = 0;
-    double last_prog = 0.0;
-
-    while (total_received < file_size) {
-        int64_t remaining = file_size - total_received;
-        size_t to_read = sizeof(buffer);
-        if (remaining < to_read) to_read = (size_t)remaining;
-
-        bytes_read = read(sock, buffer, to_read);
-        if (bytes_read <= 0) break;
-
-        ssize_t written_bytes = write(fd, buffer, bytes_read);
-        if (written_bytes != bytes_read) break;
-
-        total_received += bytes_read;
-        
-        if (file_size > 0) {
-            double down_prog = (double)total_received / file_size;
-            if (down_prog - last_prog >= 0.01 || total_received == file_size) {
-                pthread_mutex_lock(&g_prog_mutex);
-                g_down_prog[slot_index].progress = down_prog;
-                pthread_mutex_unlock(&g_prog_mutex);
-                last_prog = down_prog;
-                snprintf(g_status_msg, 100, "다운중(%.20s...): %.0f%%", item.filename, down_prog * 100);
-            }
-        }
-    }
-    
-    close(fd); close(sock);
-
-    if (total_received == file_size) {
-        snprintf(g_status_msg, 100, "다운완료: %.30s...", item.filename);
-        add_queue(item.filename);
-    } else {
-        snprintf(g_status_msg, 100, "다운실패(%.30s...): 불완전", item.filename);
-        remove(item.filename);
-    }
-
-cleanup:
-    if (slot_index != -1) {
-        pthread_mutex_lock(&g_prog_mutex);
-        g_down_prog[slot_index].active = 0;
-        pthread_mutex_unlock(&g_prog_mutex);
-    }
-    return NULL;
-}
-
-void start_downloads() {
-    int selected_count = 0;
-    for (int i = 0; i < g_file_count; i++) {
-        if (!g_file_list[i].is_selected) continue;
-
-        struct DownloadArgs* args = malloc(sizeof(struct DownloadArgs));
-        if (!args) {
-            snprintf(g_status_msg, 100, "메모리 할당 오류");
-            continue;
-        }
-
-        args->file_info = g_file_list[i];
-        strcpy(args->curr_path, g_current_path);
-
-        pthread_t tid;
-
-        if (g_file_list[i].type == 'd') {
-            if (pthread_create(&tid, NULL, download_dir_thread, args) != 0) {
-                perror("pthread_create() 에러");
-                free(args);
-            } else {
-                pthread_detach(tid);
-                selected_count++;
-            }
-        } else {
-            if (pthread_create(&tid, NULL, download_thread, args) != 0) {
-                perror("pthread_create() 에러");
-                free(args);
-            } else {
-                pthread_detach(tid);
-                selected_count++;
-            }
-        }
-        g_file_list[i].is_selected = 0;
-    }
-
-    if (selected_count == 0)
-        snprintf(g_status_msg, 100, "선택된 항목이 없습니다!");
-    else
-        snprintf(g_status_msg, 100, "%d개 다운로드 시작...", selected_count);
-}
-
-void* download_dir_thread(void* arg) {
-    struct DownloadArgs* args = (struct DownloadArgs*)arg;
-    
-    char buffer[4096], resp[5] = {0};
-    char full_path[MAX_PATH];
-    
-    snprintf(full_path, sizeof(full_path), "%s/%s", args->curr_path, args->file_info.filename);
-
-    int sock = socket(PF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = inet_addr(g_server_ip);
-    serv_addr.sin_port = htons(PORT);
-
-    if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
-        snprintf(g_status_msg, 100, "폴더 다운로드 실패(연결)");
-        free(args);
-        return NULL;
-    }
-
-    snprintf(buffer, sizeof(buffer), "%s %s %s", CMD_AUTH, g_user, g_pass);
-    write(sock, buffer, strlen(buffer));
-
-    if (read_full(sock, resp, 4) != 0 || strncmp(resp, RESP_OK, 4) != 0) {
-        snprintf(g_status_msg, 100, "폴더 다운로드 실패(인증)");
-        close(sock);
-        free(args);
-        return NULL;
-    }
-
-    uint32_t net_len, len;
-    read_full(sock, &net_len, 4); len = ntohl(net_len); read_full(sock, buffer, len);
-    read_full(sock, &net_len, 4); len = ntohl(net_len); read_full(sock, buffer, len);
-
-    snprintf(buffer, sizeof(buffer), "%s %s", CMD_GETDIR, full_path);
-    write(sock, buffer, strlen(buffer));
-
-    read_full(sock, resp, 4);
-    if (strncmp(resp, RESP_GETDIR_S, 4) != 0) {
-        snprintf(g_status_msg, 100, "폴더 다운로드 실패(응답)");
-        close(sock);
-        free(args);
-        return NULL;
-    }
-
-    uint64_t size_net;
-    read_full(sock, &size_net, sizeof(size_net));
-    uint64_t total_size = be64toh(size_net);
-
-    char save_name[MAX_FILENAME + 5];
-    snprintf(save_name, sizeof(save_name), "%s.tar", args->file_info.filename);
-
-    char savepath[MAX_PATH];
-    snprintf(savepath, sizeof(savepath), "%s/%s", g_download_dir, save_name);
-    
-    int fd = open(savepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        snprintf(g_status_msg, 100, "파일 저장 실패: %s", strerror(errno));
-        close(sock);
-        free(args);
-        return NULL;
-    }
-
-    uint64_t received = 0;
-    while (received < total_size) {
-        ssize_t r = read(sock, buffer, sizeof(buffer));
-        if (r <= 0) break;
-        
-        ssize_t w = write(fd, buffer, r);
-        if (w <= 0) break;
-        
-        received += w;
-    }
-
-    close(fd);
-    close(sock);
-    free(args);
-    
-    if (received == total_size) {
-        snprintf(g_status_msg, 100, "폴더 다운로드 완료: %s", save_name);
-    } else {
-         snprintf(g_status_msg, 100, "폴더 다운로드 실패 (전송 불완전)");
-    }
-    
-    return NULL;
-}
-    */
-
-#include "client.h"
-
 void get_hidden_input(char *buffer, size_t size);
+static int recv_full(int sock, void* buf, size_t len);
 
 
-// 소켓에서 정확히 len 만큼 읽음
-static int recv_full(int sock, void* buf, size_t len) {
-    size_t total = 0;
-    while (total < len) {
-        ssize_t n = recv(sock, (char*)buf + total, len - total, 0);
-        if (n <= 0) return -1;
-        total += n;
+
+// AUTH (로그인) 
+int auth_client(int sock){
+    printf("User: ");
+    fgets(g_user, sizeof(g_user), stdin);
+    g_user[strcspn(g_user,"\n")] = 0;
+
+    printf("Pass: ");
+    fflush(stdout);
+    get_hidden_input(g_pass,sizeof(g_pass));   
+    printf("\n");
+
+    char sendbuf[200];
+    snprintf(sendbuf,sizeof(sendbuf),"%s %s %s",CMD_AUTH,g_user,g_pass);
+    send(sock,sendbuf,strlen(sendbuf),0);
+
+    char resp[4];
+    if(recv_full(sock,resp,4)<0) return -1;
+    if(memcmp(resp,RESP_OK,4)!=0){
+        printf("❌ 로그인 실패\n");
+        return -1;
     }
-    return 0;
+
+    // 로그인 후 ROOT/CURR 경로 수신
+    uint32_t len1,len2;
+
+    recv_full(sock,&len1,4); len1=ntohl(len1);
+    recv_full(sock,g_root_path,len1);
+    g_root_path[len1]=0;
+
+    recv_full(sock,&len2,4); len2=ntohl(len2);
+    recv_full(sock,g_current_path,len2);
+    g_current_path[len2]=0;
+
+    printf("🔐 로그인 성공 → ROOT:%s\n", g_root_path);
+    parse_path();
+    return 1;
 }
 
 
-// ---------- 디렉토리 목록 요청 ----------
-void request_list(int sock) {
+
+// 파일 목록 (LS)
+
+void request_list(int sock){
     send(sock,CMD_LS,strlen(CMD_LS),0);
 
     char header[5]={0};
     recv_full(sock,header,4);
-
     if(strcmp(header,RESP_LS_S)!=0){
         strcpy(g_status_msg,"[ERR] 서버 응답 이상");
         return;
     }
 
-    uint32_t count_net;
-    recv_full(sock,&count_net,4);
-    int count = ntohl(count_net);
+    uint32_t cnt_net;
+    recv_full(sock,&cnt_net,4);
+    int count = ntohl(cnt_net);
 
     if(g_file_list) free(g_file_list);
     g_file_list = calloc(count,sizeof(struct FileInfo));
@@ -574,26 +89,42 @@ void request_list(int sock) {
     for(int i=0;i<count;i++){
         recv_full(sock,&g_file_list[i].type,1);
 
-        uint64_t sz_net;
-        recv_full(sock,&sz_net,8);
-        g_file_list[i].size = be64toh(sz_net);
+        uint64_t s_net;
+        recv_full(sock,&s_net,8);
+        g_file_list[i].size = be64toh(s_net);
 
-        uint32_t name_len_net;
-        recv_full(sock,&name_len_net,4);
-        int name_len = ntohl(name_len_net);
+        uint32_t nl;
+        recv_full(sock,&nl,4); nl = ntohl(nl);
+        recv_full(sock,g_file_list[i].filename,nl);
+        g_file_list[i].filename[nl]=0;
 
-        recv_full(sock,g_file_list[i].filename,name_len);
-        g_file_list[i].filename[name_len]=0;
+        // ⭐ 여기가 기존 코드에서 빠져있던 부분
+        recv_full(sock, g_file_list[i].mod_time_str,20);
+        g_file_list[i].mod_time_str[19]=0;
+
+        recv_full(sock, g_file_list[i].owner,32);
+        g_file_list[i].owner[31]=0;
+
+        recv_full(sock, g_file_list[i].group,32);
+        g_file_list[i].group[31]=0;
+
+        recv_full(sock, g_file_list[i].permissions,12);
+        g_file_list[i].permissions[11]=0;
+
+        g_file_list[i].is_selected=0;
+        g_file_list[i].is_downloaded=0;
     }
 
     char end[5]={0};
-    recv_full(sock,end,4);   // ★★★★★ 중요 — LS_E 따로 읽기
+    recv_full(sock,end,4);  // ← LS_E 수신
 
     sort_list();
     strcpy(g_status_msg,"📁 목록 로드 완료");
 }
 
-// ---------- 디렉토리 이동 ----------
+
+
+// 디렉토리 이동 (CD)
 void cd_client(int sock,const char* dirname){
     char buf[300];
     snprintf(buf,sizeof(buf),"%s %s\n",CMD_CD,dirname);
@@ -601,23 +132,22 @@ void cd_client(int sock,const char* dirname){
 
     char resp[4];
     if(recv_full(sock,resp,4)<0) return;
-
     if(strcmp(resp,RESP_OK)!=0){
         strcpy(g_status_msg,"❌ 이동 실패");
         return;
     }
 
-    uint32_t len;
-    recv_full(sock,&len,4);
-    len = ntohl(len);
-    recv_full(sock,g_current_path,len);
-    g_current_path[len]=0;
+    uint32_t l;
+    recv_full(sock,&l,4); l=ntohl(l);
+    recv_full(sock,g_current_path,l);
+    g_current_path[l]=0;
 
     parse_path();
     strcpy(g_status_msg,"📂 이동 완료");
 }
 
-// ---------- 파일 내용 받아 출력 ----------
+
+//  CAT 파일 조회
 char* cat_client_fetch(int sock,const char* filename,size_t* out_size){
     char buf[300];
     snprintf(buf,sizeof(buf),"%s %s\n",CMD_CAT,filename);
@@ -627,7 +157,6 @@ char* cat_client_fetch(int sock,const char* filename,size_t* out_size){
     recv_full(sock,resp,4);
     if(strcmp(resp,RESP_OK)!=0) return NULL;
 
-    // 파일 전체 수신 (CAT_E까지)
     size_t cap=8192,len=0;
     char* data=malloc(cap);
 
@@ -637,10 +166,10 @@ char* cat_client_fetch(int sock,const char* filename,size_t* out_size){
         if(n<=0){free(data);return NULL;}
 
         if(n>=4 && memcmp(chunk+n-4,RESP_CAT_E,4)==0){
-            int real_size=n-4;
-            if(len+real_size>cap){cap*=2;data=realloc(data,cap);}
-            memcpy(data+len,chunk,real_size);
-            len+=real_size;
+            int real=n-4;
+            if(len+real>cap){cap*=2; data=realloc(data,cap);}
+            memcpy(data+len,chunk,real);
+            len+=real;
             break;
         }
 
@@ -653,23 +182,24 @@ char* cat_client_fetch(int sock,const char* filename,size_t* out_size){
     return data;
 }
 
-// ---------- 다운로드 스레드 ----------
+
+
+// 다운로드 스레드 (GET) 
 void* download_thread(void* arg){
-    struct DownloadArgs *A = (struct DownloadArgs*)arg;
-    int idx=-1;
+    struct DownloadArgs*A=(struct DownloadArgs*)arg;
+    int slot=-1;
 
     pthread_mutex_lock(&g_prog_mutex);
     for(int i=0;i<MAX_ACTIVE_DOWNLOADS;i++){
         if(!g_down_prog[i].active){
+            slot=i;
             g_down_prog[i].active=1;
-            idx=i;
             strncpy(g_down_prog[i].filename,A->file_info.filename,MAX_FILENAME);
             break;
         }
     }
     pthread_mutex_unlock(&g_prog_mutex);
-
-    if(idx==-1){free(A);return NULL;}
+    if(slot==-1){free(A);return NULL;}
 
     int sock=socket(AF_INET,SOCK_STREAM,0);
     struct sockaddr_in addr={0};
@@ -678,35 +208,38 @@ void* download_thread(void* arg){
     inet_pton(AF_INET,g_server_ip,&addr.sin_addr);
     connect(sock,(void*)&addr,sizeof(addr));
 
-    char buf[300];
-    snprintf(buf,sizeof(buf),"%s %s\n",CMD_GET,A->file_info.filename);
-    send(sock,buf,strlen(buf),0);
+    // 서버에 파일 GET
+    char cmd[300];
+    snprintf(cmd,sizeof(cmd),"%s %s",CMD_GET,A->file_info.filename);
+    send(sock,cmd,strlen(cmd),0);
 
     char resp[5]={0};
     recv_full(sock,resp,4);
     if(strcmp(resp,RESP_GET_S)!=0){
-        g_down_prog[idx].active=0; free(A); close(sock); return NULL;
+        g_down_prog[slot].active=0;
+        close(sock); free(A);
+        return NULL;
     }
 
     int64_t size_net;
     recv_full(sock,&size_net,8);
-    int64_t total=be64toh(size_net);
+    long long total=be64toh(size_net);
 
     char local[500];
     snprintf(local,sizeof(local),"%s/%s",g_download_dir,A->file_info.filename);
 
     FILE*f=fopen(local,"wb");
-    long received=0;
-    char chunk[4096];
+    long rec=0;
+    char buf[4096];
 
-    while(received<total){
-        ssize_t n=recv(sock,chunk,4096,0);
+    while(rec<total){
+        int n=recv(sock,buf,4096,0);
         if(n<=0)break;
-        fwrite(chunk,1,n,f);
-        received+=n;
+        fwrite(buf,1,n,f);
+        rec+=n;
 
         pthread_mutex_lock(&g_prog_mutex);
-        g_down_prog[idx].progress=(double)received/total;
+        g_down_prog[slot].progress=(double)rec/total;
         pthread_mutex_unlock(&g_prog_mutex);
     }
 
@@ -714,15 +247,16 @@ void* download_thread(void* arg){
     close(sock);
 
     pthread_mutex_lock(&g_prog_mutex);
-    g_down_prog[idx].active=0;
+    g_down_prog[slot].active=0;
     pthread_mutex_unlock(&g_prog_mutex);
-    add_queue(A->file_info.filename);
 
+    add_queue(A->file_info.filename);
     free(A);
     return NULL;
 }
 
-// ---------- 다운로드 시작 ----------
+
+//  다운로드 시작 (선택 파일 복수 처리)
 void start_downloads(){
     for(int i=0;i<g_file_count;i++){
         if(g_file_list[i].is_selected){
@@ -740,55 +274,25 @@ void start_downloads(){
     strcpy(g_status_msg,"⬇ 다운로드 시작");
 }
 
-int auth_client(int sock){
-    printf("User: ");
-    fgets(g_user, sizeof(g_user), stdin); 
-    g_user[strcspn(g_user, "\n")]=0;
 
-    printf("Pass: ");
-    fflush(stdout);
-    get_hidden_input(g_pass, sizeof(g_pass));
-    printf("\n");   
+void get_hidden_input(char *buffer, size_t size){
+    struct termios old,new;
+    tcgetattr(STDIN_FILENO,&old);
+    new=old; new.c_lflag &= ~(ECHO);
+    tcsetattr(STDIN_FILENO,TCSANOW,&new);
 
+    fgets(buffer,size,stdin);
+    buffer[strcspn(buffer,"\n")]=0;
 
-    char sendbuf[200];
-    snprintf(sendbuf,sizeof(sendbuf),"%s %s %s",CMD_AUTH,g_user,g_pass);
-    send(sock,sendbuf,strlen(sendbuf),0);
-
-    char resp[4];
-    if(recv_full(sock,resp,4)<0) return -1;
-    if(memcmp(resp,RESP_OK,4)!=0){
-        printf("❌ 로그인 실패\n");
-        return -1;
-    }
-
-    uint32_t len1,len2;
-    recv_full(sock,&len1,4);
-    len1 = ntohl(len1);
-    recv_full(sock,g_root_path,len1);
-    g_root_path[len1]=0;
-
-    recv_full(sock,&len2,4);
-    len2 = ntohl(len2);
-    recv_full(sock,g_current_path,len2);
-    g_current_path[len2]=0;
-
-    printf("🔐 로그인 성공 → ROOT:%s\n", g_root_path);
-
-    parse_path();
-    return 1;
+    tcsetattr(STDIN_FILENO,TCSANOW,&old);
 }
 
-void get_hidden_input(char *buffer, size_t size) {
-    struct termios oldt, newt;
-
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-    newt.c_lflag &= ~(ECHO);   
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-
-    fgets(buffer, size, stdin);
-    buffer[strcspn(buffer, "\n")] = 0;
-
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt); 
+static int recv_full(int sock, void* buf, size_t len){
+    size_t now=0;
+    while(now<len){
+        ssize_t n=recv(sock,(char*)buf+now,len-now,0);
+        if(n<=0) return -1;
+        now+=n;
+    }
+    return 0;
 }
