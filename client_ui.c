@@ -1,6 +1,6 @@
 #include "client.h"
-#include <wctype.h> // For iswspace, etc.
-#include <locale.h> // For setlocale
+#include <wctype.h>
+#include <locale.h>
 
 void show_remote_file(const char* filename);
 
@@ -14,18 +14,31 @@ void scroll_text(int y, int x, const char* text, int max_width) {
         return;
     }
     int scroll_len = len + 3;
-    int offset = g_scroll_tick % scroll_len;
-    char scroll_buf[MAX_FILENAME * 2 + 4];
-    snprintf(scroll_buf, sizeof(scroll_buf), "%s   %s", text, text);
-    if (offset + max_width <= strlen(scroll_buf)) {
-        mvprintw(y, x, "%.*s", max_width, scroll_buf + offset);
-    } else {
-        mvprintw(y, x, "%.*s", max_width, text);
+    int char_offset = g_scroll_tick % scroll_len;
+    
+    wchar_t wtext[MAX_FILENAME * 2 + 4];
+    mbstowcs(wtext, text, MAX_FILENAME);
+    
+    wchar_t scroll_wbuf[MAX_FILENAME * 4 + 10];
+    swprintf(scroll_wbuf, sizeof(scroll_wbuf)/sizeof(wchar_t), L"%ls   %ls", wtext, wtext);
+    size_t scroll_wlen = wcslen(scroll_wbuf);
+    
+    if (char_offset < scroll_wlen) {
+        wchar_t display_buf[MAX_FILENAME + 1];
+        wcsncpy(display_buf, scroll_wbuf + char_offset, max_width);
+        display_buf[max_width] = L'\0';
+        
+        char mb_display[MAX_FILENAME * 4];
+        wcstombs(mb_display, display_buf, sizeof(mb_display));
+        mvprintw(y, x, "%s", mb_display);
+        
+        int printed_len = get_mb_len(mb_display);
+        for(int i=printed_len; i<max_width; i++) addch(' ');
     }
 }
 
 /**
- * @brief TUI 메인 화면을 그립니다.
+ * TUI 메인 화면을 그립니다.
  */
 void draw_tui() {
     erase();
@@ -211,7 +224,7 @@ void draw_tui() {
                 case COL_TIME:
                     mvprintw(screen_y, current_x, "| %-16s", item->mod_time_str); break;
                 case COL_SIZE:
-                    if (item->type == 'd' || item->type == 'l' || item->size < 0) {
+                    if (item->type == 'l' || item->size < 0) {
                         mvprintw(screen_y, current_x, "| %8s ", "");
                     } else {
                         char size_buf[10];
@@ -228,7 +241,7 @@ void draw_tui() {
             }
                     current_x += G_COL_WIDTHS[j];
                     }
-                    mvprintw(screen_y, current_x, " | [ %s ]  ", item->is_downloaded ? "●" : " "); // UI 수정: 헤더와 너비를 맞추기 위해 공백 추가
+                    mvprintw(screen_y, current_x, " | [ %s ]  ", item->is_downloaded ? "●" : " ");
                     
                             if (color_pair == 8) attroff(A_DIM);
                             attroff(COLOR_PAIR(color_pair));
@@ -265,27 +278,29 @@ void draw_tui() {
     mvprintw(status_bar_y, 0, "%*s", max_x, " ");
 
     char help_str[256];
-    switch(g_focus_zone) {
+    switch (g_focus_zone) {
         case ZONE_PATH:
             snprintf(help_str, 256, "[↔]이동 [Enter]선택 [↓]헤더 [Q]종료");
             break;
         case ZONE_HEADER:
-            snprintf(help_str, 256, "[↔]컬럼 [C]정렬기준 [D]정렬순서 [⤉]경로 [↓]목록 [Q]종료");
+            snprintf(help_str, 256, "[↔]커럼 [C]정렬기준 [D]정렬순서 [⤉]경로 [↓]목록 [Q]종료 [S]경로설정 [U]업로드");
             break;
         case ZONE_LIST:
         default:
              if (g_file_count > 0) {
-                char enter_action[20];
-                if (g_file_list[g_selected_item].type == 'd') {
-                    snprintf(enter_action, sizeof(enter_action), "이동");
+                const char *enter_action = "";
+                if (strcmp(g_file_list[g_selected_item].filename, "..") == 0) {
+                    enter_action = "상위폴더";
+                } else if (g_file_list[g_selected_item].type == 'd') {
+                    enter_action = "진입";
                 } else if (g_file_list[g_selected_item].type == 'f') {
                     if (is_binary(g_file_list[g_selected_item].filename)) {
-                        snprintf(enter_action, sizeof(enter_action), "미리보기 불가");
+                        enter_action = "미리보기 불가";
                     } else {
-                        snprintf(enter_action, sizeof(enter_action), "보기");
+                        enter_action = "보기";
                     }
                 } else {
-                    snprintf(enter_action, sizeof(enter_action), "동작불가");
+                    enter_action = "동작불가";
                 }
                 snprintf(help_str, 256, "[↑↓]이동 [Space]선택 [Enter]%s [D]다운 [Q]종료", enter_action);
             } else {
@@ -374,6 +389,12 @@ void handle_keys(int ch) {
                     g_sort_order *= -1;
                     sort_list();
                     break;
+                case 'S': case 's':
+                    download_path_mode();
+                    break;
+                case 'U': case 'u':
+                    upload_mode();
+                    break;
             }
             break;
         case ZONE_LIST:
@@ -417,7 +438,6 @@ void handle_keys(int ch) {
     }
 }
 
-// Private helper function to display content in a scrollable viewer
 void show_content_viewer(const char* title, const char* content) {
     if (!content) {
         snprintf(g_status_msg, 100, "내용이 없습니다.");
@@ -467,7 +487,7 @@ void show_content_viewer(const char* title, const char* content) {
 
         attron(COLOR_PAIR(11));
         mvprintw(max_y - 1, 0, "%*s", max_x, " ");
-        mvprintw(max_y - 1, 0, "[↑↓]스크롤 [Enter/Q/ESC]나가기"); // Updated help text
+        mvprintw(max_y - 1, 0, "[↑↓]스크롤 [Enter/Q/ESC]나가기");
         attroff(COLOR_PAIR(11));
 
         refresh();
@@ -475,7 +495,7 @@ void show_content_viewer(const char* title, const char* content) {
 
         if (ch == KEY_UP && scroll_pos > 0) scroll_pos--;
         else if (ch == KEY_DOWN && scroll_pos + content_height < line_count) scroll_pos++;
-        else if (ch == '\n' || ch == KEY_ENTER || ch == 'q' || ch == 'Q' || ch == 27) break; // Added 'ch == 27' for ESC
+        else if (ch == '\n' || ch == KEY_ENTER || ch == 'q' || ch == 'Q' || ch == 27) break;
     }
 
     free(content_copy);

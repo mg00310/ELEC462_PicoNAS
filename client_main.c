@@ -1,4 +1,8 @@
+// ================= client_main.c ==================
 #include "client.h"
+#define _XOPEN_SOURCE 700
+#include <unistd.h>
+#include <sys/stat.h>
 
 // --- 전역 변수 정의 ---
 struct FileInfo *g_file_list = NULL;
@@ -14,13 +18,15 @@ char g_current_path[MAX_PATH] = "/";
 char g_root_path[MAX_PATH] = "/";
 time_t g_scroll_time = 0;
 long g_scroll_tick = 0;
+char g_download_dir[1024] = "";
+
 
 int g_focus_zone = ZONE_LIST;
 int g_sort_mode = SORT_NAME;
 int g_sort_order = 1;
 
 const char* G_COL_NAMES_KR[] = { " 수정시간          ", " 크기     ", " 소유자   ", " 그룹     ", " 권한         " };
-const int G_COL_WIDTHS[] = { 18, 10, 10, 10, 13 }; // [UI Fix] '권한' 컬럼 너비 조정 (14->13)
+const int G_COL_WIDTHS[] = { 18, 10, 10, 10, 13 };
 int g_visible_cols = 0;
 
 char g_path_segs[MAX_PATH_SEGMENTS][MAX_NAME];
@@ -47,19 +53,20 @@ void init_tui() {
     initscr(); cbreak(); noecho();
     keypad(stdscr, TRUE); curs_set(0);
     nodelay(stdscr, TRUE);
+
     start_color();
     init_pair(1, COLOR_WHITE, COLOR_BLACK);
-    init_pair(2, COLOR_BLACK, COLOR_YELLOW); // 하이라이트
+    init_pair(2, COLOR_BLACK, COLOR_YELLOW);
     init_pair(3, COLOR_CYAN, COLOR_BLACK);
     init_pair(4, COLOR_BLUE, COLOR_BLACK);
     init_pair(5, COLOR_WHITE, COLOR_RED);
     init_pair(6, COLOR_MAGENTA, COLOR_BLACK);
     init_pair(7, COLOR_BLACK, COLOR_CYAN);
-    init_pair(8, COLOR_WHITE, COLOR_BLACK); // A_DIM 대용 (회색)
-    init_pair(9, COLOR_WHITE, COLOR_BLACK); // A_DIM 대용 (회색)
+    init_pair(8, COLOR_WHITE, COLOR_BLACK);
+    init_pair(9, COLOR_WHITE, COLOR_BLACK);
     init_pair(10, COLOR_BLACK, COLOR_WHITE);
-    init_pair(11, COLOR_BLACK, COLOR_GREEN); // 기본 경로 바
-    init_pair(12, COLOR_BLUE, COLOR_YELLOW); // 다운로드 완료 항목용 (파란 글씨/노란 배경)
+    init_pair(11, COLOR_BLACK, COLOR_GREEN);
+    init_pair(12, COLOR_BLUE, COLOR_YELLOW);
 }
 
 void close_tui() {
@@ -72,12 +79,11 @@ void close_tui() {
  * @brief SIGINT (Ctrl+C) 신호 핸들러.
  */
 void sigint_handler(int signo) {
-    if (g_cmd_mode) { // 이미 명령어 모드일 때 Ctrl+C를 누르면 종료
+    if (g_cmd_mode) {
         close_tui();
         client_log(LOG_INFO, "Program terminated by user (double Ctrl+C).");
         exit(0);
     }
-    // 첫번째 Ctrl+C: 명령어 모드로 진입하기 위해 플래그 설정
     g_cmd_mode = 1;
     client_log(LOG_INFO, "EVENT: Ctrl+C detected, entering command mode.");
 }
@@ -85,10 +91,25 @@ void sigint_handler(int signo) {
 
 // --- 메인 함수 ---
 int main(int argc, char *argv[]) {
-    signal(SIGINT, sigint_handler); // SIGINT 핸들러 등록
+    signal(SIGINT, sigint_handler);
+
+    char exe_path[1024];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len != -1) {
+        exe_path[len] = '\0';
+        char *last_slash = strrchr(exe_path, '/');
+        if (last_slash) {
+            *last_slash = '\0';
+            snprintf(g_download_dir, sizeof(g_download_dir), "%s/Downloads", exe_path);
+        } else {
+            strcpy(g_download_dir, "./Downloads");
+        }
+    } else {
+        strcpy(g_download_dir, "./Downloads");
+    }
+    mkdir(g_download_dir, 0755);
 
     if (init_client_log() != 0) {
-        // 로그 파일 열기 실패 시, 에러 메시지만 출력하고 종료
         exit(1);
     }
     client_log(LOG_INFO, "--- Client Started ---");
@@ -102,14 +123,7 @@ int main(int argc, char *argv[]) {
 
     int port = PORT;
     if (argc == 3) {
-        int custom_port = atoi(argv[2]);
-        if (custom_port > 0 && custom_port < 65536) {
-            port = custom_port;
-        } else {
-            fprintf(stderr, "에러: 유효하지 않은 포트 번호입니다: %s\n", argv[2]);
-            client_log(LOG_ERROR, "Invalid port number provided: %s", argv[2]);
-            exit(1);
-        }
+        port = atoi(argv[2]);
     }
     
     client_log(LOG_INFO, "Attempting to connect to server: %s:%d", g_server_ip, port);
@@ -141,11 +155,11 @@ int main(int argc, char *argv[]) {
     client_log(LOG_INFO, "Authentication successful (user: %s). Starting TUI.", g_user);
     printf("인증 성공! TUI를 시작합니다.\n");
     sleep(1);
+
     init_tui();
     init_queue();
     init_debug_log();
 
-    // 다운로드 진행상태 공유 변수 초기화
     pthread_mutex_init(&g_prog_mutex, NULL);
     for (int i = 0; i < MAX_ACTIVE_DOWNLOADS; i++) {
         g_down_prog[i].active = 0;
@@ -153,13 +167,18 @@ int main(int argc, char *argv[]) {
     }
     
     request_list(g_sock_main);
+
+    draw_tui();
+    refresh();
+
     g_scroll_time = time(NULL);
+
     while (1) {
         int needs_redraw = 0;
 
         if (g_cmd_mode) {
             enter_cmd_mode();
-            g_cmd_mode = 0; // Reset flag after returning
+            g_cmd_mode = 0; 
             needs_redraw = 1;
         }
 
@@ -169,7 +188,7 @@ int main(int argc, char *argv[]) {
             handle_keys(ch);
             needs_redraw = 1;
         }
-        
+
         check_queue();
 
         time_t now = time(NULL);
@@ -179,7 +198,6 @@ int main(int argc, char *argv[]) {
             needs_redraw = 1;
         }
 
-        // 다운로드 중일 때 부드러운 진행률 표시를 위해 화면 강제 갱신
         int active_downloads = 0;
         pthread_mutex_lock(&g_prog_mutex);
         for (int i = 0; i < MAX_ACTIVE_DOWNLOADS; i++) {
@@ -200,7 +218,9 @@ int main(int argc, char *argv[]) {
 
         usleep(50000);
     }
+
     close_tui();
     close(g_sock_main);
     return 0;
 }
+
