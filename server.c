@@ -83,6 +83,7 @@ void do_put(ClientState* state, char* buffer);
 void do_getdir(ClientState* state, char* buffer);
 void get_perm_str(mode_t mode, char *str);
 int write_full(int sock, const void* buf, size_t len);
+ssize_t read_full(int sock, void* buf, size_t len);
 
 // --- 서버 메인 ---
 int main(int argc, char* argv[]) {
@@ -682,4 +683,16 @@ void get_perm_str(mode_t mode, char *str) {
     if (mode & S_IROTH) str[7] = 'r';
     if (mode & S_IWOTH) str[8] = 'w';
     if (mode & S_IXOTH) str[9] = 'x';
+}
+
+ssize_t read_full(int sock, void* buf, size_t len) {
+    size_t total = 0;
+    ssize_t n;
+
+    while (total < len) {
+        n = read(sock, (char*)buf + total, len - total);
+        if (n <= 0) return -1;
+        total += n;
+    }
+    return total;
 }

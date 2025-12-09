@@ -1,4 +1,4 @@
-#define _GNU_SOURCE
+/*#define _GNU_SOURCE
 #include "client.h"
 #include <unistd.h>
 #include <errno.h>
@@ -531,4 +531,264 @@ void* download_dir_thread(void* arg) {
     }
     
     return NULL;
+}
+    */
+
+#include "client.h"
+
+void get_hidden_input(char *buffer, size_t size);
+
+
+// 소켓에서 정확히 len 만큼 읽음
+static int recv_full(int sock, void* buf, size_t len) {
+    size_t total = 0;
+    while (total < len) {
+        ssize_t n = recv(sock, (char*)buf + total, len - total, 0);
+        if (n <= 0) return -1;
+        total += n;
+    }
+    return 0;
+}
+
+
+// ---------- 디렉토리 목록 요청 ----------
+void request_list(int sock) {
+    send(sock,CMD_LS,strlen(CMD_LS),0);
+
+    char header[5]={0};
+    recv_full(sock,header,4);
+
+    if(strcmp(header,RESP_LS_S)!=0){
+        strcpy(g_status_msg,"[ERR] 서버 응답 이상");
+        return;
+    }
+
+    uint32_t count_net;
+    recv_full(sock,&count_net,4);
+    int count = ntohl(count_net);
+
+    if(g_file_list) free(g_file_list);
+    g_file_list = calloc(count,sizeof(struct FileInfo));
+    g_file_count = count;
+
+    for(int i=0;i<count;i++){
+        recv_full(sock,&g_file_list[i].type,1);
+
+        uint64_t sz_net;
+        recv_full(sock,&sz_net,8);
+        g_file_list[i].size = be64toh(sz_net);
+
+        uint32_t name_len_net;
+        recv_full(sock,&name_len_net,4);
+        int name_len = ntohl(name_len_net);
+
+        recv_full(sock,g_file_list[i].filename,name_len);
+        g_file_list[i].filename[name_len]=0;
+    }
+
+    char end[5]={0};
+    recv_full(sock,end,4);   // ★★★★★ 중요 — LS_E 따로 읽기
+
+    sort_list();
+    strcpy(g_status_msg,"📁 목록 로드 완료");
+}
+
+// ---------- 디렉토리 이동 ----------
+void cd_client(int sock,const char* dirname){
+    char buf[300];
+    snprintf(buf,sizeof(buf),"%s %s\n",CMD_CD,dirname);
+    send(sock,buf,strlen(buf),0);
+
+    char resp[4];
+    if(recv_full(sock,resp,4)<0) return;
+
+    if(strcmp(resp,RESP_OK)!=0){
+        strcpy(g_status_msg,"❌ 이동 실패");
+        return;
+    }
+
+    uint32_t len;
+    recv_full(sock,&len,4);
+    len = ntohl(len);
+    recv_full(sock,g_current_path,len);
+    g_current_path[len]=0;
+
+    parse_path();
+    strcpy(g_status_msg,"📂 이동 완료");
+}
+
+// ---------- 파일 내용 받아 출력 ----------
+char* cat_client_fetch(int sock,const char* filename,size_t* out_size){
+    char buf[300];
+    snprintf(buf,sizeof(buf),"%s %s\n",CMD_CAT,filename);
+    send(sock,buf,strlen(buf),0);
+
+    char resp[4];
+    recv_full(sock,resp,4);
+    if(strcmp(resp,RESP_OK)!=0) return NULL;
+
+    // 파일 전체 수신 (CAT_E까지)
+    size_t cap=8192,len=0;
+    char* data=malloc(cap);
+
+    while(1){
+        char chunk[4096];
+        int n=recv(sock,chunk,4096,0);
+        if(n<=0){free(data);return NULL;}
+
+        if(n>=4 && memcmp(chunk+n-4,RESP_CAT_E,4)==0){
+            int real_size=n-4;
+            if(len+real_size>cap){cap*=2;data=realloc(data,cap);}
+            memcpy(data+len,chunk,real_size);
+            len+=real_size;
+            break;
+        }
+
+        if(len+n>cap){cap*=2;data=realloc(data,cap);}
+        memcpy(data+len,chunk,n);
+        len+=n;
+    }
+
+    *out_size=len;
+    return data;
+}
+
+// ---------- 다운로드 스레드 ----------
+void* download_thread(void* arg){
+    struct DownloadArgs *A = (struct DownloadArgs*)arg;
+    int idx=-1;
+
+    pthread_mutex_lock(&g_prog_mutex);
+    for(int i=0;i<MAX_ACTIVE_DOWNLOADS;i++){
+        if(!g_down_prog[i].active){
+            g_down_prog[i].active=1;
+            idx=i;
+            strncpy(g_down_prog[i].filename,A->file_info.filename,MAX_FILENAME);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_prog_mutex);
+
+    if(idx==-1){free(A);return NULL;}
+
+    int sock=socket(AF_INET,SOCK_STREAM,0);
+    struct sockaddr_in addr={0};
+    addr.sin_family=AF_INET;
+    addr.sin_port=htons(PORT);
+    inet_pton(AF_INET,g_server_ip,&addr.sin_addr);
+    connect(sock,(void*)&addr,sizeof(addr));
+
+    char buf[300];
+    snprintf(buf,sizeof(buf),"%s %s\n",CMD_GET,A->file_info.filename);
+    send(sock,buf,strlen(buf),0);
+
+    char resp[5]={0};
+    recv_full(sock,resp,4);
+    if(strcmp(resp,RESP_GET_S)!=0){
+        g_down_prog[idx].active=0; free(A); close(sock); return NULL;
+    }
+
+    int64_t size_net;
+    recv_full(sock,&size_net,8);
+    int64_t total=be64toh(size_net);
+
+    char local[500];
+    snprintf(local,sizeof(local),"%s/%s",g_download_dir,A->file_info.filename);
+
+    FILE*f=fopen(local,"wb");
+    long received=0;
+    char chunk[4096];
+
+    while(received<total){
+        ssize_t n=recv(sock,chunk,4096,0);
+        if(n<=0)break;
+        fwrite(chunk,1,n,f);
+        received+=n;
+
+        pthread_mutex_lock(&g_prog_mutex);
+        g_down_prog[idx].progress=(double)received/total;
+        pthread_mutex_unlock(&g_prog_mutex);
+    }
+
+    fclose(f);
+    close(sock);
+
+    pthread_mutex_lock(&g_prog_mutex);
+    g_down_prog[idx].active=0;
+    pthread_mutex_unlock(&g_prog_mutex);
+    add_queue(A->file_info.filename);
+
+    free(A);
+    return NULL;
+}
+
+// ---------- 다운로드 시작 ----------
+void start_downloads(){
+    for(int i=0;i<g_file_count;i++){
+        if(g_file_list[i].is_selected){
+            struct DownloadArgs*A=malloc(sizeof(struct DownloadArgs));
+            A->file_info=g_file_list[i];
+            strcpy(A->curr_path,g_current_path);
+
+            pthread_t t;
+            pthread_create(&t,NULL,download_thread,A);
+            pthread_detach(t);
+
+            g_file_list[i].is_selected=0;
+        }
+    }
+    strcpy(g_status_msg,"⬇ 다운로드 시작");
+}
+
+int auth_client(int sock){
+    printf("User: ");
+    fgets(g_user, sizeof(g_user), stdin); 
+    g_user[strcspn(g_user, "\n")]=0;
+
+    printf("Pass: ");
+    fflush(stdout);
+    get_hidden_input(g_pass, sizeof(g_pass));
+    printf("\n");   
+
+
+    char sendbuf[200];
+    snprintf(sendbuf,sizeof(sendbuf),"%s %s %s",CMD_AUTH,g_user,g_pass);
+    send(sock,sendbuf,strlen(sendbuf),0);
+
+    char resp[4];
+    if(recv_full(sock,resp,4)<0) return -1;
+    if(memcmp(resp,RESP_OK,4)!=0){
+        printf("❌ 로그인 실패\n");
+        return -1;
+    }
+
+    uint32_t len1,len2;
+    recv_full(sock,&len1,4);
+    len1 = ntohl(len1);
+    recv_full(sock,g_root_path,len1);
+    g_root_path[len1]=0;
+
+    recv_full(sock,&len2,4);
+    len2 = ntohl(len2);
+    recv_full(sock,g_current_path,len2);
+    g_current_path[len2]=0;
+
+    printf("🔐 로그인 성공 → ROOT:%s\n", g_root_path);
+
+    parse_path();
+    return 1;
+}
+
+void get_hidden_input(char *buffer, size_t size) {
+    struct termios oldt, newt;
+
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ECHO);   
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+
+    fgets(buffer, size, stdin);
+    buffer[strcspn(buffer, "\n")] = 0;
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt); 
 }

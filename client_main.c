@@ -154,9 +154,11 @@ int main(int argc, char *argv[]) {
 
     client_log(LOG_INFO, "Authentication successful (user: %s). Starting TUI.", g_user);
     printf("인증 성공! TUI를 시작합니다.\n");
-    sleep(1);
+    fflush(stdout);
 
     init_tui();
+    client_log(LOG_INFO, "TUI initialized");
+
     init_queue();
     init_debug_log();
 
@@ -167,6 +169,10 @@ int main(int argc, char *argv[]) {
     }
     
     request_list(g_sock_main);
+    
+    printf("DEBUG: LS 요청 완료, TUI 진입\n");
+    fflush(stdout);
+
 
     draw_tui();
     refresh();

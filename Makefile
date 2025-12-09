@@ -25,6 +25,7 @@ all: $(SERVER_BIN) $(CLIENT_BIN)
 $(SERVER_BIN): $(SERVER_SRC) common.h
 	$(CC) $(CFLAGS) -o $(SERVER_BIN) $(SERVER_SRC) $(SERVER_LIBS)
 
+
 # 클라이언트 빌드
 $(CLIENT_BIN): $(CLIENT_SRC) common.h client.h
 	$(CC) $(CFLAGS) -o $(CLIENT_BIN) $(CLIENT_SRC) $(CLIENT_LIBS)
