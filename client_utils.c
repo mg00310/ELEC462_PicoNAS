@@ -1,6 +1,6 @@
 #include "client.h"
 #include <strings.h>
-
+ 
 // 미리보기 불가능한 파일 확장자 목록
 static const char* unviewable_extensions[] = {
     ".mp3", ".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv",

@@ -1,6 +1,6 @@
 #include "client.h"
 #include <wctype.h>
-#include <locale.h>
+#include <locale.h> 
 
 void show_remote_file(const char* filename);
 

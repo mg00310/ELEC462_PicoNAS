@@ -1,4 +1,4 @@
-/*
+/* 
  * server.c - Pico NAS 서버
  */
 #define _XOPEN_SOURCE 700
