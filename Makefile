@@ -1,5 +1,5 @@
 # Makefile for Pico NAS Project (고급 기능 버전)
- 
+
 # 컴파일러
 CC = gcc
 # 경고 제거 옵션 추가

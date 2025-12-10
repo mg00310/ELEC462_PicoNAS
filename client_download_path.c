@@ -2,10 +2,10 @@
 #include "client.h"
 #include <dirent.h>
 #include <sys/stat.h>
- 
+
 int dp_sel = 0;
 char dp_path[1024] = ".";
-
+ 
 struct FileInfo *dp_list = NULL;
 int dp_count = 0;
 

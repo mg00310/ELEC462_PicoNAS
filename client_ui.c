@@ -1,6 +1,6 @@
 #include "client.h"
 #include <wctype.h>
-#include <locale.h> 
+#include <locale.h>
 
 void show_remote_file(const char* filename);
 
@@ -224,7 +224,7 @@ void draw_tui() {
                 case COL_TIME:
                     mvprintw(screen_y, current_x, "| %-16s", item->mod_time_str); break;
                 case COL_SIZE:
-                    if (item->type == 'l' || item->size < 0) {
+                    if (item->type == 'd' || item->type == 'l' || item->size < 0) {
                         mvprintw(screen_y, current_x, "| %8s ", "");
                     } else {
                         char size_buf[10];

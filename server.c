@@ -1,4 +1,4 @@
-/* 
+/*
  * server.c - Pico NAS 서버
  */
 #define _XOPEN_SOURCE 700
@@ -399,11 +399,7 @@ void do_ls(ClientState* state) {
         }
         strncpy(item->filename, entry->d_name, MAX_FILENAME);
         if (S_ISDIR(st.st_mode)) {
-            if (strcmp(state->curr_path, "/") == 0) {
-                item->size = 0; // 루트 디렉토리의 하위 디렉토리 크기 계산 비활성화
-            } else {
-                item->size = calc_dir_size(full_path);
-            }
+            item->size = 0; // 디렉토리 크기 계산 비활성화
         } else {
             item->size = st.st_size;
         }
@@ -510,17 +506,31 @@ void do_put(ClientState* state, char* buffer) {
     sscanf(buffer + 4, "%s", filename);
     snprintf(fullpath, sizeof(fullpath), "%s/%s", state->curr_path, filename);
 
+    ////////////////////////
+    server_log("[PUT] filename=%s, curr_path=%s, fullpath=%s\n",
+            filename, state->curr_path, fullpath);
+
     // Jail 검사
     char resolved[MAX_PATH];
-    realpath(state->curr_path, resolved);
-    if (strncmp(resolved, state->root_path, strlen(state->root_path)) != 0) {
-        write(state->sock, RESP_ERR, 4);
-        return;
-    }
+       if (!realpath(state->curr_path, resolved)) {        // <- NULL 체크 추가
+           write(state->sock, RESP_ERR, 4);
+           server_log("PUT 실패: curr_path realpath 실패 (%s)\n", strerror(errno));
+           return;
+       }
+     
+       if (strncmp(resolved, state->root_path, strlen(state->root_path)) != 0) {
+           write(state->sock, RESP_ERR, 4);
+           server_log("PUT 거부: Jail 위반 (%s not under %s)\n", resolved, state->root_path);
+           return;
+       }
 
     // 서버에서 저장할 파일 열기
     int fd = open(fullpath, O_WRONLY|O_CREAT|O_TRUNC, 0644);
-    if (fd < 0) { write(state->sock, RESP_ERR, 4); return; }
+    if (fd < 0) { write(state->sock, RESP_ERR, 4); 
+        //////
+        server_log("[PUT] 파일 생성 실패 (%s)\n", strerror(errno));
+        return; }
+    server_log("[PUT] 파일 생성 성공 fd=%d\n", fd);
 
     write(state->sock, RESP_PUT_S, 4);   // 업로드 시작 승인
 
@@ -528,6 +538,7 @@ void do_put(ClientState* state, char* buffer) {
     int64_t file_size_net;
     read(state->sock, &file_size_net, sizeof(file_size_net));
     int64_t filesize = be64toh(file_size_net);
+    server_log("[PUT] filesize=%ld bytes\n", filesize);
 
     char buf[4096];
     int64_t recvbytes = 0;

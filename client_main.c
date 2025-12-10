@@ -1,12 +1,12 @@
 // ================= client_main.c ==================
 #include "client.h"
 #define _XOPEN_SOURCE 700
-#include <unistd.h> 
+#include <unistd.h>
 #include <sys/stat.h>
 
 // --- 전역 변수 정의 ---
 struct FileInfo *g_file_list = NULL;
-int g_file_count = 0; 
+int g_file_count = 0;
 int g_selected_item = 0;
 int g_scroll_offset = 0;
 char g_server_ip[16];

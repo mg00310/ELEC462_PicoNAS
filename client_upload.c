@@ -1,7 +1,7 @@
 #include "client.h"
 #include <unistd.h>
 #include <limits.h>
-#include <stdlib.h> 
+#include <stdlib.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <libgen.h>
@@ -15,6 +15,7 @@
 #ifndef be64toh
 #define be64toh(x) __builtin_bswap64(x)
 #endif
+
 
 int ul_selected = 0;
 char ul_current_path[1024] = "/";
@@ -139,7 +140,7 @@ void draw_upload_ui(){
 }
 
 /**
- * @brief 서버로 파일을 전송합니다. (버그 수정됨)
+ * @brief 서버로 파일을 전송합니다. 
  */
 void upload_file_to_server(const char* localpath,const char* servername){
     int fd=open(localpath,O_RDONLY);
@@ -158,6 +159,9 @@ void upload_file_to_server(const char* localpath,const char* servername){
     }
 
     char buf[2048],resp[5]={0};
+    int n;
+
+    /*---- AUTH ----*/
     sprintf(buf,"%s %s %s",CMD_AUTH,g_user,g_pass);
     write(sock,buf,strlen(buf));
     read(sock,resp,4);
@@ -166,47 +170,72 @@ void upload_file_to_server(const char* localpath,const char* servername){
         close(fd); close(sock); strcpy(g_status_msg, "인증 실패 (업로드 불가)"); return;
     }
 
-    // 1. 파일 크기 계산 및 포인터 리셋 (버그 수정: lseek(SEEK_SET) 추가)
-    off_t size = lseek(fd,0,SEEK_END);
-    lseek(fd,0,SEEK_SET); 
+    /*---- 파일 크기 계산 ----*/
+    off_t size=lseek(fd,0,SEEK_END);
+    lseek(fd,0,SEEK_SET);
 
-    // 2. PUT 명령 전송
-    sprintf(buf,"%s %s",CMD_PUT,servername);
+
+    char cleanname[256];  
+    snprintf(cleanname,sizeof(cleanname),"%s",servername);
+
+    int s=0,e=strlen(cleanname)-1;
+    while(cleanname[s]==' ') s++;
+    while(e>s && cleanname[e]==' ') e--;
+    cleanname[e+1]=0;
+
+
+    /*---- PUT 전송 ----*/
+    sprintf(buf,"%s %s",CMD_PUT,cleanname);
     write(sock,buf,strlen(buf));
-    read(sock,resp,4);
+    printf("[DEBUG] SEND: %s\n",buf);
 
+    /*---- 서버의 업로드 승인 응답 기다림 ----*/
+    printf("[DEBUG] waiting server RESP_PUT_S...\n");
+    n = read(sock,resp,4);              // 여기 read 단 하나만 필요
+    printf("[DEBUG] READ(%d): %.4s\n",n,resp);
+
+    if(n<=0){
+        printf("❗ 서버 응답 소실\n");
+        close(fd); close(sock);
+        return;
+    }
     if(strncmp(resp,RESP_PUT_S,4)!=0){
-        snprintf(g_status_msg, 100, "업로드 거부 (응답: %.4s)", resp);
-        close(fd);close(sock);return;
+        printf("⛔ 서버에서 업로드 거부 (resp=%.4s)\n",resp);
+        close(fd); close(sock);
+        return;
     }
 
-    // 3. 파일 크기 전송
-    int64_t net = htobe64(size);
+    /*---- 파일 크기 전송 ----*/
+    int64_t net=htobe64(size);
     write(sock,&net,8);
 
-    // 4. 파일 내용 전송
-    ssize_t r; char fb[4096];
+    /*---- 파일 내용 전송 ----*/
+    char fb[4096];
+    ssize_t r;
     while((r=read(fd,fb,4096))>0) write(sock,fb,r);
 
-    // 5. 완료 응답 수신
+    /*---- 완료 응답 ----*/
     read(sock,resp,4);
-    if(strncmp(resp,RESP_PUT_E,4)==0)
-        strcpy(g_status_msg,"✔ 업로드 완료");
-    else
-        snprintf(g_status_msg, 100, "⛔ 실패 (응답: %.4s)", resp);
+    printf("[DEBUG] FINAL RESP: %.4s\n",resp);
 
-    close(fd);close(sock);
-    request_list(g_sock_main); // 서버 목록 갱신
+    if(strncmp(resp,RESP_PUT_E,4)==0)
+         strcpy(g_status_msg,"✔ 업로드 완료");
+    else strcpy(g_status_msg,"❗ 업로드 종료(응답오류)");
+
+    close(fd); close(sock);
 }
+
 
 /**
  * @brief 로컬 파일 탐색 및 업로드 모드 메인 루프 (경로 탐색 UI 추가)
  */
 void upload_mode(){
+
     if (ul_list) {
         free(ul_list);
         ul_list = NULL;
     }
+
     
     // 초기 경로 설정 (루트에서 시작)
     if (strcmp(ul_current_path, ".") == 0) {
@@ -239,6 +268,7 @@ void upload_mode(){
         if(ch=='\n'||ch==10){
             char full[1024];
             
+            printf(">>> 선택된 이름(원본): '%s'\n", ul_list[ul_selected].filename);
             // ".." 항목을 Enter로 누르면 진입 (KEY_RIGHT와 동일 동작)
             if (ul_list[ul_selected].type=='d') goto KEY_RIGHT_ACTION;
 
