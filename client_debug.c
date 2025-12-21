@@ -5,7 +5,7 @@
 void show_log_list();
 const char* get_proto_str(const char* code, size_t len);
 
-
+ 
 /**
  * @brief 디버그 메시지 버퍼와 뮤텍스를 초기화합니다.
  */
