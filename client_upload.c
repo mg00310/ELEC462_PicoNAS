@@ -169,7 +169,7 @@ void upload_file_to_server(const char* localpath, const char* servername) {
 
     char buf[2048], resp[5] = {0};
     /*---- 1. AUTH 전송 및 응답 확인 ----*/
-    sprintf(buf, "%s %s %s", CMD_AUTH, g_user, g_pass);
+    sprintf(buf, "%s %s %s\n", CMD_AUTH, g_user, g_pass);
     write(sock, buf, strlen(buf));
     
     // AUTH 응답(4바이트)을 확실히 읽을 때까지 대기
@@ -182,15 +182,13 @@ void upload_file_to_server(const char* localpath, const char* servername) {
     uint32_t path_len;
     char dummy_path[1024]; 
     
-    // root_path 정보 읽기
-    if (read_full(sock, &path_len, 4) == 0) {
-        path_len = ntohl(path_len);
-        if (path_len < 1024) read_full(sock, dummy_path, path_len);
-    }
-    // curr_path 정보 읽기
-    if (read_full(sock, &path_len, 4) == 0) {
-        path_len = ntohl(path_len);
-        if (path_len < 1024) read_full(sock, dummy_path, path_len);
+    for (int i = 0; i < 2; i++) { 
+        if (read_full(sock, &path_len, 4) == 0) {
+            path_len = ntohl(path_len);
+            if (path_len > 0 && path_len < 1024) {
+                read_full(sock, dummy_path, path_len);
+            }
+        }
     }
 
     /*---- 2. 파일 정보 준비 ----*/
@@ -232,10 +230,19 @@ void upload_file_to_server(const char* localpath, const char* servername) {
     }
 
     /*---- 6. 파일 내용 전송 ----*/
-    char fb[4096];
+    char fb[8192];
     ssize_t bytes_read;
-    while ((bytes_read = read(fd, fb, 4096)) > 0) {
-        if (write(sock, fb, bytes_read) <= 0) break;
+    while ((bytes_read = read(fd, fb, sizeof(fb))) > 0) {
+        ssize_t total_sent = 0;
+        while (total_sent < bytes_read) {
+            ssize_t s = write(sock, fb + total_sent, bytes_read - total_sent);
+            if (s <= 0) {
+                strcpy(g_status_msg, "데이터 전송 중 연결 끊김");
+                close(fd); close(sock);
+                return;
+            }
+            total_sent += s;
+        }
     }
 
     /*---- 7. 완료 응답(RESP_PUT_E) 확인 ----*/
