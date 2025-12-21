@@ -5,7 +5,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <libgen.h>
-#include <errno.h> // 에러 메시지 처리를 위해 추가
+#include <errno.h> 
 #include <byteswap.h>
 
 #include <endian.h>
@@ -141,88 +141,113 @@ void draw_upload_ui(){
 
 /**
  * @brief 서버로 파일을 전송합니다. 
- */
-void upload_file_to_server(const char* localpath,const char* servername){
-    int fd=open(localpath,O_RDONLY);
-    if(fd<0){ snprintf(g_status_msg,100,"파일 열기 실패: %s",strerror(errno)); return;}
+*/
+void upload_file_to_server(const char* localpath, const char* servername) {
+    int fd = open(localpath, O_RDONLY);
+    if (fd < 0) { 
+        snprintf(g_status_msg, 100, "파일 열기 실패: %s", strerror(errno)); 
+        return; 
+    }
 
-    int sock=socket(PF_INET,SOCK_STREAM,0);
-    if (sock < 0) { close(fd); strcpy(g_status_msg, "소켓 생성 실패"); return; }
+    int sock = socket(PF_INET, SOCK_STREAM, 0);
+    if (sock < 0) { 
+        close(fd); 
+        strcpy(g_status_msg, "소켓 생성 실패"); 
+        return; 
+    }
     
     struct sockaddr_in serv;
-    serv.sin_family=AF_INET;
-    serv.sin_port=htons(PORT);
-    serv.sin_addr.s_addr=inet_addr(g_server_ip);
+    serv.sin_family = AF_INET;
+    serv.sin_port = htons(PORT);
+    serv.sin_addr.s_addr = inet_addr(g_server_ip);
 
-    if (connect(sock,(struct sockaddr*)&serv,sizeof(serv)) < 0) {
-        close(fd); close(sock); snprintf(g_status_msg, 100, "서버 연결 실패 (%s)", strerror(errno)); return;
+    if (connect(sock, (struct sockaddr*)&serv, sizeof(serv)) < 0) {
+        close(fd); close(sock); 
+        snprintf(g_status_msg, 100, "서버 연결 실패 (%s)", strerror(errno)); 
+        return;
     }
 
-    char buf[2048],resp[5]={0};
-    int n;
-
-    /*---- AUTH ----*/
-    sprintf(buf,"%s %s %s",CMD_AUTH,g_user,g_pass);
-    write(sock,buf,strlen(buf));
-    read(sock,resp,4);
-
-    if (strncmp(resp, RESP_OK, 4) != 0) {
-        close(fd); close(sock); strcpy(g_status_msg, "인증 실패 (업로드 불가)"); return;
+    char buf[2048], resp[5] = {0};
+    /*---- 1. AUTH 전송 및 응답 확인 ----*/
+    sprintf(buf, "%s %s %s", CMD_AUTH, g_user, g_pass);
+    write(sock, buf, strlen(buf));
+    
+    // AUTH 응답(4바이트)을 확실히 읽을 때까지 대기
+    if (read_full(sock, resp, 4) != 0 || strncmp(resp, RESP_OK, 4) != 0) {
+        close(fd); close(sock); 
+        strcpy(g_status_msg, "인증 실패 (업로드 불가)"); 
+        return;
     }
 
-    /*---- 파일 크기 계산 ----*/
-    off_t size=lseek(fd,0,SEEK_END);
-    lseek(fd,0,SEEK_SET);
+    uint32_t path_len;
+    char dummy_path[1024]; 
+    
+    // root_path 정보 읽기
+    if (read_full(sock, &path_len, 4) == 0) {
+        path_len = ntohl(path_len);
+        if (path_len < 1024) read_full(sock, dummy_path, path_len);
+    }
+    // curr_path 정보 읽기
+    if (read_full(sock, &path_len, 4) == 0) {
+        path_len = ntohl(path_len);
+        if (path_len < 1024) read_full(sock, dummy_path, path_len);
+    }
 
+    /*---- 2. 파일 정보 준비 ----*/
+    off_t size = lseek(fd, 0, SEEK_END);
+    lseek(fd, 0, SEEK_SET);
 
     char cleanname[256];  
-    snprintf(cleanname,sizeof(cleanname),"%s",servername);
+    snprintf(cleanname, sizeof(cleanname), "%s", servername);
+    // 파일명 앞뒤 공백 제거
+    int s = 0, e = strlen(cleanname) - 1;
+    while (cleanname[s] == ' ') s++;
+    while (e > s && cleanname[e] == ' ') e--;
+    cleanname[e + 1] = 0;
 
-    int s=0,e=strlen(cleanname)-1;
-    while(cleanname[s]==' ') s++;
-    while(e>s && cleanname[e]==' ') e--;
-    cleanname[e+1]=0;
+    /*---- 3. PUT 명령어 전송 ----*/
+    sprintf(buf, "%s %s\n", CMD_PUT, &cleanname[s]);
+    write(sock, buf, strlen(buf));
 
-
-    /*---- PUT 전송 ----*/
-    sprintf(buf,"%s %s",CMD_PUT,cleanname);
-    write(sock,buf,strlen(buf));
-    printf("[DEBUG] SEND: %s\n",buf);
-
-    /*---- 서버의 업로드 승인 응답 기다림 ----*/
-    printf("[DEBUG] waiting server RESP_PUT_S...\n");
-    n = read(sock,resp,4);              // 여기 read 단 하나만 필요
-    printf("[DEBUG] READ(%d): %.4s\n",n,resp);
-
-    if(n<=0){
-        printf("❗ 서버 응답 소실\n");
-        close(fd); close(sock);
+    /*---- 4. 서버의 업로드 승인(RESP_PUT_S) 대기 ----*/
+    memset(resp, 0, 5);
+    if (read_full(sock, resp, 4) != 0) {
+        strcpy(g_status_msg, "서버 응답 소실");
+        close(fd); close(sock); 
         return;
     }
-    if(strncmp(resp,RESP_PUT_S,4)!=0){
-        printf("⛔ 서버에서 업로드 거부 (resp=%.4s)\n",resp);
+
+    if (strncmp(resp, RESP_PUT_S, 4) != 0) {
+        snprintf(g_status_msg, 100, "서버 거부: %.4s", resp);
         close(fd); close(sock);
         return;
     }
 
-    /*---- 파일 크기 전송 ----*/
-    int64_t net=htobe64(size);
-    write(sock,&net,8);
+    /*---- 5. 파일 크기 전송 (8바이트) ----*/
+    int64_t net_size = htobe64((int64_t)size);
+    if (write(sock, &net_size, 8) != 8) {
+        strcpy(g_status_msg, "크기 정보 전송 실패");
+        close(fd); close(sock);
+        return;
+    }
 
-    /*---- 파일 내용 전송 ----*/
+    /*---- 6. 파일 내용 전송 ----*/
     char fb[4096];
-    ssize_t r;
-    while((r=read(fd,fb,4096))>0) write(sock,fb,r);
+    ssize_t bytes_read;
+    while ((bytes_read = read(fd, fb, 4096)) > 0) {
+        if (write(sock, fb, bytes_read) <= 0) break;
+    }
 
-    /*---- 완료 응답 ----*/
-    read(sock,resp,4);
-    printf("[DEBUG] FINAL RESP: %.4s\n",resp);
+    /*---- 7. 완료 응답(RESP_PUT_E) 확인 ----*/
+    memset(resp, 0, 5);
+    if (read_full(sock, resp, 4) == 0 && strncmp(resp, RESP_PUT_E, 4) == 0) {
+        strcpy(g_status_msg, "✔ 업로드 완료");
+    } else {
+        strcpy(g_status_msg, "❗ 업로드 종료(응답오류)");
+    }
 
-    if(strncmp(resp,RESP_PUT_E,4)==0)
-         strcpy(g_status_msg,"✔ 업로드 완료");
-    else strcpy(g_status_msg,"❗ 업로드 종료(응답오류)");
-
-    close(fd); close(sock);
+    close(fd);
+    close(sock);
 }
 
 
@@ -346,4 +371,4 @@ void upload_mode(){
     }
     // 노딜레이 복구
     nodelay(stdscr, TRUE);
-}  
+}
