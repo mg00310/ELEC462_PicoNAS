@@ -346,4 +346,4 @@ void upload_mode(){
     }
     // 노딜레이 복구
     nodelay(stdscr, TRUE);
-}
+}  
