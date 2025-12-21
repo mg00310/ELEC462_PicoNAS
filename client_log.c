@@ -6,7 +6,7 @@
 static FILE* log_file = NULL;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 const char* level_strings[] = {"INFO", "DEBUG", "WARN", "ERROR", "FATAL"};
-
+ 
 /**
  * @brief 클라이언트 로그 파일을 생성하고 엽니다.
  * 'logs' 디렉터리를 만들고, 타임스탬프 기반의 로그 파일을 생성합니다.
