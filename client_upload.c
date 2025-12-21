@@ -5,7 +5,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <libgen.h>
-#include <errno.h> // 에러 메시지 처리를 위해 추가
+#include <errno.h> 
 #include <byteswap.h>
 
 #include <endian.h>
@@ -15,6 +15,7 @@
 #ifndef be64toh
 #define be64toh(x) __builtin_bswap64(x)
 #endif
+
 
 int ul_selected = 0;
 char ul_current_path[1024] = "/";
@@ -139,74 +140,134 @@ void draw_upload_ui(){
 }
 
 /**
- * @brief 서버로 파일을 전송합니다. (버그 수정됨)
- */
-void upload_file_to_server(const char* localpath,const char* servername){
-    int fd=open(localpath,O_RDONLY);
-    if(fd<0){ snprintf(g_status_msg,100,"파일 열기 실패: %s",strerror(errno)); return;}
+ * @brief 서버로 파일을 전송합니다. 
+*/
+void upload_file_to_server(const char* localpath, const char* servername) {
+    int fd = open(localpath, O_RDONLY);
+    if (fd < 0) { 
+        snprintf(g_status_msg, 100, "파일 열기 실패: %s", strerror(errno)); 
+        return; 
+    }
 
-    int sock=socket(PF_INET,SOCK_STREAM,0);
-    if (sock < 0) { close(fd); strcpy(g_status_msg, "소켓 생성 실패"); return; }
+    int sock = socket(PF_INET, SOCK_STREAM, 0);
+    if (sock < 0) { 
+        close(fd); 
+        strcpy(g_status_msg, "소켓 생성 실패"); 
+        return; 
+    }
     
     struct sockaddr_in serv;
-    serv.sin_family=AF_INET;
-    serv.sin_port=htons(PORT);
-    serv.sin_addr.s_addr=inet_addr(g_server_ip);
+    serv.sin_family = AF_INET;
+    serv.sin_port = htons(PORT);
+    serv.sin_addr.s_addr = inet_addr(g_server_ip);
 
-    if (connect(sock,(struct sockaddr*)&serv,sizeof(serv)) < 0) {
-        close(fd); close(sock); snprintf(g_status_msg, 100, "서버 연결 실패 (%s)", strerror(errno)); return;
+    if (connect(sock, (struct sockaddr*)&serv, sizeof(serv)) < 0) {
+        close(fd); close(sock); 
+        snprintf(g_status_msg, 100, "서버 연결 실패 (%s)", strerror(errno)); 
+        return;
     }
 
-    char buf[2048],resp[5]={0};
-    sprintf(buf,"%s %s %s",CMD_AUTH,g_user,g_pass);
-    write(sock,buf,strlen(buf));
-    read(sock,resp,4);
-
-    if (strncmp(resp, RESP_OK, 4) != 0) {
-        close(fd); close(sock); strcpy(g_status_msg, "인증 실패 (업로드 불가)"); return;
+    char buf[2048], resp[5] = {0};
+    /*---- 1. AUTH 전송 및 응답 확인 ----*/
+    sprintf(buf, "%s %s %s\n", CMD_AUTH, g_user, g_pass);
+    write(sock, buf, strlen(buf));
+    
+    // AUTH 응답(4바이트)을 확실히 읽을 때까지 대기
+    if (read_full(sock, resp, 4) != 0 || strncmp(resp, RESP_OK, 4) != 0) {
+        close(fd); close(sock); 
+        strcpy(g_status_msg, "인증 실패 (업로드 불가)"); 
+        return;
     }
 
-    // 1. 파일 크기 계산 및 포인터 리셋 (버그 수정: lseek(SEEK_SET) 추가)
-    off_t size = lseek(fd,0,SEEK_END);
-    lseek(fd,0,SEEK_SET); 
-
-    // 2. PUT 명령 전송
-    sprintf(buf,"%s %s",CMD_PUT,servername);
-    write(sock,buf,strlen(buf));
-    read(sock,resp,4);
-
-    if(strncmp(resp,RESP_PUT_S,4)!=0){
-        snprintf(g_status_msg, 100, "업로드 거부 (응답: %.4s)", resp);
-        close(fd);close(sock);return;
+    uint32_t path_len;
+    char dummy_path[1024]; 
+    
+    for (int i = 0; i < 2; i++) { 
+        if (read_full(sock, &path_len, 4) == 0) {
+            path_len = ntohl(path_len);
+            if (path_len > 0 && path_len < 1024) {
+                read_full(sock, dummy_path, path_len);
+            }
+        }
     }
 
-    // 3. 파일 크기 전송
-    int64_t net = htobe64(size);
-    write(sock,&net,8);
+    /*---- 2. 파일 정보 준비 ----*/
+    off_t size = lseek(fd, 0, SEEK_END);
+    lseek(fd, 0, SEEK_SET);
 
-    // 4. 파일 내용 전송
-    ssize_t r; char fb[4096];
-    while((r=read(fd,fb,4096))>0) write(sock,fb,r);
+    char cleanname[256];  
+    snprintf(cleanname, sizeof(cleanname), "%s", servername);
+    // 파일명 앞뒤 공백 제거
+    int s = 0, e = strlen(cleanname) - 1;
+    while (cleanname[s] == ' ') s++;
+    while (e > s && cleanname[e] == ' ') e--;
+    cleanname[e + 1] = 0;
 
-    // 5. 완료 응답 수신
-    read(sock,resp,4);
-    if(strncmp(resp,RESP_PUT_E,4)==0)
-        strcpy(g_status_msg,"✔ 업로드 완료");
-    else
-        snprintf(g_status_msg, 100, "⛔ 실패 (응답: %.4s)", resp);
+    /*---- 3. PUT 명령어 전송 ----*/
+    sprintf(buf, "%s %s\n", CMD_PUT, &cleanname[s]);
+    write(sock, buf, strlen(buf));
 
-    close(fd);close(sock);
-    request_list(g_sock_main); // 서버 목록 갱신
+    /*---- 4. 서버의 업로드 승인(RESP_PUT_S) 대기 ----*/
+    memset(resp, 0, 5);
+    if (read_full(sock, resp, 4) != 0) {
+        strcpy(g_status_msg, "서버 응답 소실");
+        close(fd); close(sock); 
+        return;
+    }
+
+    if (strncmp(resp, RESP_PUT_S, 4) != 0) {
+        snprintf(g_status_msg, 100, "서버 거부: %.4s", resp);
+        close(fd); close(sock);
+        return;
+    }
+
+    /*---- 5. 파일 크기 전송 (8바이트) ----*/
+    int64_t net_size = htobe64((int64_t)size);
+    if (write(sock, &net_size, 8) != 8) {
+        strcpy(g_status_msg, "크기 정보 전송 실패");
+        close(fd); close(sock);
+        return;
+    }
+
+    /*---- 6. 파일 내용 전송 ----*/
+    char fb[8192];
+    ssize_t bytes_read;
+    while ((bytes_read = read(fd, fb, sizeof(fb))) > 0) {
+        ssize_t total_sent = 0;
+        while (total_sent < bytes_read) {
+            ssize_t s = write(sock, fb + total_sent, bytes_read - total_sent);
+            if (s <= 0) {
+                strcpy(g_status_msg, "데이터 전송 중 연결 끊김");
+                close(fd); close(sock);
+                return;
+            }
+            total_sent += s;
+        }
+    }
+
+    /*---- 7. 완료 응답(RESP_PUT_E) 확인 ----*/
+    memset(resp, 0, 5);
+    if (read_full(sock, resp, 4) == 0 && strncmp(resp, RESP_PUT_E, 4) == 0) {
+        strcpy(g_status_msg, "✔ 업로드 완료");
+    } else {
+        strcpy(g_status_msg, "❗ 업로드 종료(응답오류)");
+    }
+
+    close(fd);
+    close(sock);
 }
+
 
 /**
  * @brief 로컬 파일 탐색 및 업로드 모드 메인 루프 (경로 탐색 UI 추가)
  */
 void upload_mode(){
+
     if (ul_list) {
         free(ul_list);
         ul_list = NULL;
     }
+
     
     // 초기 경로 설정 (루트에서 시작)
     if (strcmp(ul_current_path, ".") == 0) {
@@ -239,6 +300,7 @@ void upload_mode(){
         if(ch=='\n'||ch==10){
             char full[1024];
             
+            printf(">>> 선택된 이름(원본): '%s'\n", ul_list[ul_selected].filename);
             // ".." 항목을 Enter로 누르면 진입 (KEY_RIGHT와 동일 동작)
             if (ul_list[ul_selected].type=='d') goto KEY_RIGHT_ACTION;
 
