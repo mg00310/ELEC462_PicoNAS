@@ -141,7 +141,7 @@ int main(int argc, char* argv[]) {
     close(serv_sock);
     return 0;
 }
-
+ 
 /**
  * @brief 요청한 길이만큼 데이터를 모두 소켓에 씁니다.
  * @return 성공 시 0, 실패 시 -1.
@@ -153,6 +153,17 @@ int write_full(int sock, const void* buf, size_t len) {
         if (written <= 0) return -1;
         total_written += written;
     }
+    return 0;
+}
+
+int read_full(int sock, void* buf, size_t len) {
+    size_t total_read = 0;
+    char* p = buf;
+    while (total_read < len) {
+        ssize_t bytes_read = read(sock, p + total_read, len - total_read);
+        if (bytes_read <= 0) return -1; // 연결 끊김
+        total_read += bytes_read;
+    } 
     return 0;
 }
 
@@ -228,6 +239,7 @@ void do_auth(ClientState* state, char* buffer) {
             }
         }
     }
+    
     fclose(fp);
     if (auth_success) {
         server_log("유저 '%s' 인증 성공. 루트: %s\n", user, state->root_path);
@@ -525,33 +537,57 @@ void do_put(ClientState* state, char* buffer) {
        }
 
     // 서버에서 저장할 파일 열기
-    int fd = open(fullpath, O_WRONLY|O_CREAT|O_TRUNC, 0644);
-    if (fd < 0) { write(state->sock, RESP_ERR, 4); 
-        //////
-        server_log("[PUT] 파일 생성 실패 (%s)\n", strerror(errno));
-        return; }
-    server_log("[PUT] 파일 생성 성공 fd=%d\n", fd);
-
-    write(state->sock, RESP_PUT_S, 4);   // 업로드 시작 승인
-
-    // filesize 수신
-    int64_t file_size_net;
-    read(state->sock, &file_size_net, sizeof(file_size_net));
-    int64_t filesize = be64toh(file_size_net);
-    server_log("[PUT] filesize=%ld bytes\n", filesize);
-
-    char buf[4096];
-    int64_t recvbytes = 0;
-    while(recvbytes < filesize) {
-        ssize_t r = read(state->sock, buf, sizeof(buf));
-        if (r <= 0) break;
-        write(fd, buf, r);
-        recvbytes += r;
+    int fd = open(fullpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        server_log("[PUT] 파일 생성 실패: %s\n", filename);
+        write(state->sock, RESP_PUT_E, 4);
+        return;
     }
+    server_log("[PUT] 파일 생성 성공 fd=%d, 경로=%s\n", fd, fullpath);
+
+    // 클라이언트에게 승인 신호(PUT_S)를 보냄
+    if (write(state->sock, RESP_PUT_S, 4) != 4) {
+        server_log("[PUT] 승인 신호 전송 실패\n");
+        close(fd);
+        return;
+    }
+
+    // 8바이트 파일 크기를 확실하게 읽음
+    int64_t file_size_net = 0;
+    if (read_full(state->sock, &file_size_net, sizeof(int64_t)) != 0) {
+        server_log("파일 크기 수신 실패 (연결 끊김)\n");
+        close(fd);
+        return;
+    }
+
+    int64_t filesize = be64toh(file_size_net);
+    server_log("[PUT] 수신 예정 크기: %ld bytes\n", filesize);
+
+    // 실제 파일 데이터 수신 루프
+    char buf[8192];
+    int64_t total_received = 0;
+    while (total_received < filesize) {
+        int64_t remain = filesize - total_received;
+        int64_t to_read = (remain < sizeof(buf)) ? remain : sizeof(buf);
+        
+        ssize_t r = read(state->sock, buf, to_read);
+        if (r <= 0) {
+            server_log("[PUT] 데이터 수신 중 중단 (%ld/%ld)\n", total_received, filesize);
+            break;
+        }
+        write(fd, buf, r);
+        total_received += r;
+    }
+
     close(fd);
 
-    write(state->sock, RESP_PUT_E, 4); // 완료 응답
-    server_log("업로드 완료: %s (%ld bytes)\n", filename, filesize);
+    // 완료 신호 전송
+    if (total_received == filesize) {
+        server_log("[PUT] 업로드 완료: %ld bytes\n", total_received);
+        write(state->sock, RESP_PUT_E, 4);
+    } else {
+        server_log("[PUT] 업로드 실패: 크기 불일치\n");
+    }
 }
 
 
